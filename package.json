@@ -3,7 +3,7 @@
 	"version": "0.0.1",
 	"description": "A Stremio add-on that wraps any other add-on (defaults to Torrentio) and renames streams and filenames to generic names.",
 	"scripts": {
-		"start": "node addon.js"
+		"start": "node server.js"
 	},
 	"dependencies": {
 		"express": "^5.1.0",

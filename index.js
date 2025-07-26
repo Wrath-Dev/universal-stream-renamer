@@ -71,8 +71,8 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
         const clean = {
           ...s,
           name : cleanName,
-          title: "Generic Stream",
-          description: `Stream ${counter}`,
+          title: cleanName,
+          description: cleanName,
           behaviorHints:{
             ...(s.behaviorHints||{}),
             filename: cleanName.replace(/\s+/g,"_") + ".mp4"

@@ -1,10 +1,12 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – v2.3.5
- * Original logic + tiny /proxy wrapper for Chromecast
+ *  UNIVERSAL STREAM RENAMER  –  v2.3.6
+ *  • Keeps your original desktop logic and built‑in /configure page
+ *  • Adds /proxy?u=… (302) so Android‑TV / Chromecast can play streams
+ *  • Adds root “/ → /configure” redirect so opening the bare host works
  **************************************************************************/
 
-const express                     = require("express");          // NEW
-const http                        = require("http");             // NEW
+const express                     = require("express");
+const http                        = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
@@ -13,9 +15,9 @@ const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-buck
 /*────────────────────────── manifest ──────────────────────────*/
 const manifest = {
   id          : "org.universal.stream.renamer",
-  version     : "2.3.5",
+  version     : "2.3.6",
   name        : "Universal Stream Renamer",
-  description : "Renames Torrentio streams; TV/Chromecast‑safe 302 proxy.",
+  description : "Renames Torrentio streams; adds same‑origin proxy for TV / Chromecast.",
   resources   : ["stream"],
   types       : ["movie", "series"],
   idPrefixes  : ["tt"],
@@ -29,7 +31,7 @@ const manifest = {
 const builder     = new addonBuilder(manifest);
 const userConfigs = Object.create(null);
 
-/* helper: follow one RD redirect and return final CDN URL */
+/* helper: follow one Real‑Debrid redirect and return final CDN URL */
 async function resolveRD(rdUrl) {
   try {
     const res = await fetch(rdUrl, { method: "HEAD", redirect: "manual", timeout: 4000 });
@@ -37,7 +39,7 @@ async function resolveRD(rdUrl) {
   } catch { return rdUrl; }
 }
 
-/*────────────────── stream handler ──────────────────*/
+/*──────────────────── stream handler ────────────────────*/
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const ua   = (headers?.["user-agent"] || "").toLowerCase();
   const isTV = ua.includes("android") || ua.includes("crkey") || ua.includes("smarttv");
@@ -60,10 +62,10 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
           /* resolve RD redirect */
           if (st.url && st.url.includes("/resolve/realdebrid/")) {
             const final = await resolveRD(st.url);
-            st.url = isTV ? `/proxy?u=${encodeURIComponent(final)}` : final; // ← key line
+            st.url = isTV ? `/proxy?u=${encodeURIComponent(final)}` : final;   // ← wrap only for TV
           }
 
-          /* rename ONLY for desktop/web */
+          /* rename streams ONLY for desktop/web */
           if (!isTV) {
             const tag = st.name.match(/\[RD[^\]]*\]/)?.[0] || "[RD]";
             st = {
@@ -98,7 +100,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   return { streams };
 });
 
-/*──────────────────── /proxy route ────────────────────*/
+/*─────────────────── /proxy route ────────────────────*/
 function isAllowed(u) {
   try {
     const { hostname, protocol } = new URL(u);
@@ -110,16 +112,20 @@ function isAllowed(u) {
 
 const app = express();
 
+/* same‑origin 302 redirect for TV/Chromecast */
 app.get("/proxy", (req, res) => {
   const u = req.query.u;
   if (!isAllowed(u)) return res.status(400).send("invalid target");
-  res.redirect(302, u);                         // ←  one‑line magic
+  res.redirect(302, u);
 });
 
-/* mount Stremio router – keeps /configure exactly the same */
+/* ⭐ restore root → /configure convenience */
+app.get("/", (_req, res) => res.redirect("/configure"));
+
+/* mount Stremio router – serves /configure, /manifest.json, /stream/… */
 app.use("/", getRouter(builder.getInterface()));
 
-/* start server */
+/*──────────────────── start server ────────────────────*/
 const PORT = process.env.PORT || 7001;
 http.createServer(app).listen(PORT, () => {
   const external = process.env.RENDER_EXTERNAL_URL || `http://127.0.0.1:${PORT}`;

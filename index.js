@@ -8,7 +8,7 @@
 const express                     = require("express");
 const http                        = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
-const AbortController = global.AbortController || (await import("abort-controller")).default;
+const AbortController = global.AbortController || (await require("abort-controller")).default;
 
 const PORT = process.env.PORT || 10000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";

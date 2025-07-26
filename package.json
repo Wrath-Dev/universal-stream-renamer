@@ -1,19 +1,18 @@
 {
-  "name": "stremio-universal-stream-renamer",
-  "version": "1.2.1",
-  "description": "A Stremio add-on that wraps any other add-on (defaults to Torrentio) and renames streams and filenames to generic names.",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "author": "TheWrathDev",
-  "license": "MIT",
-  "dependencies": {
-    "express": "^5.1.0",
-    "stremio-addon-sdk": "^1.3.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Wrath-Dev/stremio-universal-stream-renamer.git"
-  }
+	"name": "stremio-addon-universtalstreamrenamer",
+	"version": "0.0.1",
+	"description": "A Stremio add-on that wraps any other add-on (defaults to Torrentio) and renames streams and filenames to generic names.",
+	"scripts": {
+		"start": "node addon.js"
+	},
+	"dependencies": {
+		"express": "^5.1.0",
+		"stremio-addon-sdk": "1.1.x"
+	},
+	"author": "TheWrathDev",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Wrath-Dev/stremio-universal-stream-renamer.git"
+	}
 }

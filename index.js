@@ -72,7 +72,6 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
           ...s,
           name : cleanName,
           title: cleanName,
-          description: cleanName,
           behaviorHints:{
             ...(s.behaviorHints||{}),
             filename: cleanName.replace(/\s+/g,"_") + ".mp4"

@@ -52,7 +52,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
 
   /* Fetch Torrentio (2 s timeout) */
   const api = `${u.origin}/stream/${type}/${id}.json${u.search}`;
-  const ctrl = new AbortController(); setTimeout(()=>ctrl.abort(), 2000);
+  const ctrl = new AbortController(); setTimeout(()=>ctrl.abort(), 5000);
   const res  = await fetch(api, { signal: ctrl.signal }).catch(()=>null);
   const raw  = res?.ok ? (await res.json()).streams || [] : [];
 

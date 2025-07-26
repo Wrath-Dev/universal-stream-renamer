@@ -43,8 +43,11 @@ function putCache(key, data) {
 
 /* ─────────── STREAM HANDLER ─────────── */
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
+  console.log("UA:", headers["user-agent"]);
+
   const ua   = (headers?.["user-agent"] || "").toLowerCase();
-  const isTV = /stremio.*(android|tv)|crkey|smarttv/.test(ua);
+  const isTV = /(exoplayer|stagefright|dalvik|android tv|bravia|shield|crkey|smarttv)/i
+               .test(ua);
 
   const src = (config?.sourceAddonUrl || DEFAULT_SOURCE).replace("stremio://", "https://");
   const srcURL = new URL(src);

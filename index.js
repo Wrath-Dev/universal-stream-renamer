@@ -1,23 +1,20 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.0.4
- * • Renames ONLY Real‑Debrid streams on desktop
- * • Leaves all other stream names untouched
+ * UNIVERSAL STREAM RENAMER – clean numbered names on desktop
  **************************************************************************/
 
 const express                     = require("express");
 const http                        = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 
-const PORT = process.env.PORT || 10000;
+const PORT           = process.env.PORT || 10000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
-/* manifest */
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.0.4",
+  version: "4.1.0",
   name: "Universal Stream Renamer",
-  description: "Renames only Real‑Debrid streams; Chromecast‑safe proxy.",
+  description: "Clean numbered names on desktop; Chromecast‑safe proxy.",
   resources: ["stream"],
   types: ["movie", "series"],
   idPrefixes: ["tt"],
@@ -43,8 +40,8 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
   const isTV = ua.includes("android") || ua.includes("crkey") || ua.includes("smarttv");
 
   let src=config?.sourceAddonUrl || userConfigs.default || DEFAULT_SOURCE;
-  if(config?.sourceAddonUrl) userConfigs.default = src;
-  if(src.startsWith("stremio://")) src = src.replace("stremio://","https://");
+  if (config?.sourceAddonUrl) userConfigs.default = src;
+  if (src.startsWith("stremio://")) src = src.replace("stremio://","https://");
 
   const base = new URL(src);
   const api  = `${base.origin}/stream/${type}/${id}.json${base.search}`;
@@ -56,26 +53,29 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
     if(r.ok){
       const raw=(await r.json()).streams || [];
 
-      streams = await Promise.all(raw.map(async (s,i)=>{
-        const cameFromRD = s.url?.includes("/resolve/realdebrid/");
+      let counter = 1;
+      streams = await Promise.all(raw.map(async s=>{
+        const fromRD = s.url?.includes("/resolve/realdebrid/");
+        if(fromRD) s.url = await resolveRD(s.url);
 
-        /* resolve RD once */
-        if(cameFromRD) s.url = await resolveRD(s.url);
-
-        /* TV/Chromecast: wrap every URL */
-        if(isTV) s.url = `/proxy?u=${encodeURIComponent(s.url)}`;
-
-        /* Desktop/Web: rename only RD streams */
-        if(!isTV && cameFromRD){
-          const tag = s.name.match(/\[RD[^\]]*\]/)?.[0] || "[RD]";
-          s = { ...s, name:`${tag} Stream ${i+1}` };
+        /* wrap for TV */
+        if(isTV){
+          s.url = `/proxy?u=${encodeURIComponent(s.url)}`;
+          return s;                           // keep original name on TV
         }
-        return s;
+
+        /* desktop/web – give a clean unique name */
+        const tag = fromRD ? "[RD] " : "";
+        const clean = {
+          ...s,
+          name : `${tag}Stream ${counter++}`,
+          behaviorHints:{ ...(s.behaviorHints||{}), filename:`Stream_${counter-1}.mp4` }
+        };
+        return clean;
       }));
     }
   }catch(e){ console.error("torrentio fail", e.message); }
 
-  /* fallback for TV */
   if(isTV && streams.length===0)
     streams.push({ name:"Fallback MP4",
                    url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
@@ -84,10 +84,9 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
   return { streams };
 });
 
-/* express app */
+/* express app /configure + /proxy */
 const app = express();
 
-/* configure page */
 app.get("/configure",(req,res)=>{
   const base=`https://${req.get("host")}/manifest.json`;
   res.type("html").send(`
@@ -97,13 +96,12 @@ app.get("/configure",(req,res)=>{
 function copy(){
   const v=document.getElementById('src').value.trim();
   const url=v? '${base}?sourceAddonUrl=' + encodeURIComponent(v) : '${base}';
-  navigator.clipboard.writeText(url).then(()=>alert('Copied manifest URL to clipboard.'));
+  navigator.clipboard.writeText(url).then(()=>alert('Copied manifest URL'));
 }
 </script>`);
 });
 app.get("/",(_q,r)=>r.redirect("/configure"));
 
-/* same‑origin proxy */
 app.get("/proxy",(req,res)=>{
   try{
     const tgt=new URL(req.query.u);
@@ -113,7 +111,7 @@ app.get("/proxy",(req,res)=>{
   }catch{res.status(400).send("bad url");}
 });
 
-/* SDK router */
+/* mount SDK router */
 app.use("/", getRouter(builder.getInterface()));
 
 /* start */

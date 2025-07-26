@@ -1,149 +1,105 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.3.0
- * • No RD resolving in stream handler (fast lists)
- * • Resolve once in /proxy + in‑memory cache
- * • Clean names on desktop; original on TV/Chromecast
+ * UNIVERSAL STREAM RENAMER – 4.2.0 fast build
+ * • No RD HEAD requests
+ * • 2 s fetch timeout
+ * • 5 min memory cache
  **************************************************************************/
 
 const express                     = require("express");
 const http                        = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
+const AbortController = global.AbortController || (await import("abort-controller")).default;
 
-const PORT           = process.env.PORT || 10000;
+const PORT = process.env.PORT || 10000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
+/* ─────────── manifest ─────────── */
 const manifest = {
-  id: "org.universal.stream.renamer",
-  version: "4.3.0",
-  name: "Universal Stream Renamer",
-  description: "Fast, clean names; resolve RD only on play; Chromecast‑safe proxy.",
-  resources: ["stream"],
-  types: ["movie", "series"],
-  idPrefixes: ["tt"],
-  catalogs: [],
-  config: [{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }],
+  id          : "org.universal.stream.renamer",
+  version     : "4.2.0",
+  name        : "Universal Stream Renamer",
+  description : "Fast, clean stream names; Chromecast‑safe proxy.",
+  resources   : ["stream"],
+  types       : ["movie", "series"],
+  idPrefixes  : ["tt"],
+  catalogs    : [],
+  config      : [{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }],
   behaviorHints: { configurable: true }
 };
 
-const builder     = addonBuilder(manifest);
-const userConfigs = Object.create(null);
+const builder = addonBuilder(manifest);
 
-/* ───────── caches ───────── */
-const STREAM_TTL  = 60 * 1000;           // 60s cache for Torrentio answers
-const RD_TTL      = 60 * 60 * 1000;      // 1h cache for RD final urls
-const streamCache = new Map();           // key -> { ts, payload }
-const rdCache     = new Map();           // rdUrl -> { ts, final }
-
-/* follow one Real‑Debrid redirect, with cache */
-async function resolveRD(url) {
-  const cached = rdCache.get(url);
-  const now = Date.now();
-  if (cached && now - cached.ts < RD_TTL) return cached.final;
-
-  try {
-    const r = await fetch(url, { method: "HEAD", redirect: "manual", timeout: 4000 });
-    const final = r.headers.get("location") || url;
-    rdCache.set(url, { ts: now, final });
-    return final;
-  } catch {
-    return url;
-  }
+/* ─────────── in‑memory cache (5 min TTL) ─────────── */
+const cache = new Map();
+function putCache(key, data) {
+  cache.set(key, data);
+  setTimeout(()=>cache.delete(key), 5 * 60_000); // 5 minutes
 }
 
-/* detect TV/Chromecast robustly */
-function isTVUA(ua = "") {
-  ua = ua.toLowerCase();
-  return /stremio.*(android|tv)|crkey|smarttv/.test(ua);
-}
-
-/* ───────── stream handler ───────── */
+/* ─────────── STREAM HANDLER ─────────── */
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
-  const ua   = headers?.["user-agent"] || "";
-  const isTV = isTVUA(ua);
+  const ua   = (headers?.["user-agent"] || "").toLowerCase();
+  const isTV = /stremio.*(android|tv)|crkey|smarttv/.test(ua);
 
-  let src = config?.sourceAddonUrl || userConfigs.default || DEFAULT_SOURCE;
-  if (config?.sourceAddonUrl) userConfigs.default = src;
-  if (src.startsWith("stremio://")) src = src.replace("stremio://", "https://");
+  const src = (config?.sourceAddonUrl || DEFAULT_SOURCE).replace("stremio://", "https://");
+  const srcURL = new URL(src);
+  const apiKey = `${type}:${id}:${srcURL.search}`;          // cache key
 
-  const u    = new URL(src);
-  const key  = `${type}:${id}:${u.search}`;
-  const now  = Date.now();
+  if (cache.has(apiKey)) return cache.get(apiKey);
 
-  /* serve cached stream list quickly */
-  const cached = streamCache.get(key);
-  if (cached && now - cached.ts < STREAM_TTL) return cached.payload;
+  const apiURL = `${srcURL.origin}/stream/${type}/${id}.json${srcURL.search}`;
+  const controller = new AbortController();
+  const t = setTimeout(()=>controller.abort(), 2000);
 
-  const api = `${u.origin}/stream/${type}/${id}.json${u.search}`;
-  console.log("🔗", api);
-
-  let streams = [];
+  let rawStreams = [];
   try {
-    const r = await fetch(api, { timeout: 5000 });
-    if (r.ok) {
-      const raw = (await r.json()).streams || [];
-      let i = 1;
-
-      streams = raw.map(s => {
-        if (isTV) {
-          // TV: keep original names, just wrap every URL in proxy
-          return { ...s, url: `/proxy?u=${encodeURIComponent(s.url)}` };
-        }
-
-        // Desktop/Web: clean label + filename
-        const fromRD   = s.url?.includes("/resolve/realdebrid/");
-        const tag      = fromRD ? "[RD] " : "";
-        const label    = `${tag}Stream ${i++}`;
-        return {
-          ...s,
-          name : label,
-          title: label,
-          behaviorHints: {
-            ...(s.behaviorHints || {}),
-            filename: label.replace(/\s+/g, "_") + ".mp4"
-          }
-        };
-      });
-    }
+    const r = await fetch(apiURL, { signal: controller.signal });
+    clearTimeout(t);
+    if (r.ok) rawStreams = (await r.json()).streams || [];
+    else console.error("Torrentio HTTP", r.status, r.statusText);
   } catch (e) {
-    console.error("torrentio fetch failed:", e.message);
+    console.error("Torrentio fetch error:", e.type === "aborted" ? "timeout" : e.message);
   }
 
-  if (isTV && streams.length === 0) {
-    streams.push({
-      name : "Fallback MP4",
-      url  : `/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
-      behaviorHints: { filename: "Fallback.mp4" }
-    });
-  }
+  /* map → clean names */
+  let idx = 1;
+  const streams = rawStreams.map(s => {
+    const isRD = s.url?.includes("/resolve/realdebrid/");
+    if (isTV) {
+      /* wrap for TV (keeps original title) */
+      return { ...s, url: `/proxy?u=${encodeURIComponent(s.url)}` };
+    }
+    /* desktop/web: clean label */
+    const tag   = isRD ? "[RD] " : "";
+    const label = `${tag}Stream ${idx++}`;
+    return {
+      ...s,
+      name : label,
+      title: label,
+      behaviorHints:{
+        ...(s.behaviorHints||{}),
+        filename: label.replace(/\s+/g,"_") + ".mp4"
+      }
+    };
+  });
 
-  const payload = { streams };
-  streamCache.set(key, { ts: now, payload });
-  return payload;
+  /* TV fallback if empty */
+  if (isTV && streams.length === 0)
+    streams.push({ name:"Fallback MP4",
+                   url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
+                   behaviorHints:{ filename:"Fallback.mp4" } });
+
+  const result = { streams };
+  putCache(apiKey, result);
+  console.log(`🟢 ${type} ${id} → ${streams.length} streams (${isTV?"TV":"desktop"})`);
+  return result;
 });
 
-/* ───────── express app ───────── */
+/* ─────────── EXPRESS APP ─────────── */
 const app = express();
 
-/* resolve on-demand here (only for the stream actually played) */
-app.get("/proxy", async (req, res) => {
-  const target = req.query.u;
-  try {
-    const rd = new URL(target);
-    if (!/(real-debrid|debrid-link|rdt|cache)/i.test(rd.hostname))
-      return res.status(400).send("blocked");
-
-    const final = target.includes("/resolve/realdebrid/")
-      ? await resolveRD(target)
-      : target;
-
-    res.redirect(302, final);
-  } catch {
-    res.status(400).send("bad url");
-  }
-});
-
-/* minimal configure page */
+/* /configure helper */
 app.get("/configure", (req, res) => {
   const base = `https://${req.get("host")}/manifest.json`;
   res.type("html").send(`
@@ -155,16 +111,24 @@ app.get("/configure", (req, res) => {
 function copy(){
   const v=document.getElementById('src').value.trim();
   const url=v? '${base}?sourceAddonUrl=' + encodeURIComponent(v) : '${base}';
-  navigator.clipboard.writeText(url).then(()=>alert('Copied!')).catch(()=>alert(url));
+  navigator.clipboard.writeText(url).then(()=>alert('Copied: '+url));
 }
 </script>`);
 });
-app.get("/", (_q, r) => r.redirect("/configure"));
+app.get("/", (_q,r)=>r.redirect("/configure"));
 
-/* Stremio SDK router */
+/* Chromecast‑safe proxy */
+app.get("/proxy",(req,res)=>{
+  try{
+    const tgt=new URL(req.query.u);
+    if(!/(real-debrid|debrid-link|rdt|cache)/i.test(tgt.hostname))
+      return res.status(400).send("blocked");
+    res.redirect(302,tgt);
+  }catch{res.status(400).send("bad url");}
+});
+
+/* SDK router */
 app.use("/", getRouter(builder.getInterface()));
 
-/* start */
-http.createServer(app).listen(PORT, () => {
-  console.log("🚀 Add‑on listening on", PORT);
-});
+/* start server */
+http.createServer(app).listen(PORT, () => console.log("🚀 Add‑on running on port", PORT));

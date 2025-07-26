@@ -1,5 +1,5 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.2.4  (fast, timeout‑safe)
+ * UNIVERSAL STREAM RENAMER – 4.2.5  (wrap only direct URLs on TV)
  **************************************************************************/
 
 const express = require("express");
@@ -13,9 +13,9 @@ const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-buck
 
 const manifest = {
   id:"org.universal.stream.renamer",
-  version:"4.2.4",
+  version:"4.2.5",
   name:"Universal Stream Renamer",
-  description:"Fast, clean names; Chromecast‑safe proxy.",
+  description:"Fast, clean names; Chromecast‑safe proxy only for direct URLs.",
   resources:["stream"], types:["movie","series"], idPrefixes:["tt"],
   catalogs:[], behaviorHints:{ configurable:true }
 };
@@ -25,13 +25,13 @@ const builder = addonBuilder(manifest);
 /* 5‑minute RAM cache */
 const cache = new Map();
 const TTL = 300_000;
-const put = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k),TTL); };
+const cachePut = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k), TTL); };
 
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const uaRaw = headers?.["user-agent"] || "";
   const ua    = uaRaw.toLowerCase();
   let isTV    = /(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(ua);
-  if (!ua) isTV = true;                    // no UA → Chromecast/TV
+  if (!ua) isTV = true;                        // no UA → Chromecast/TV
 
   console.log("\nUA:", uaRaw || "<none>", "→ isTV =", isTV);
 
@@ -40,7 +40,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const cacheKey = `${type}:${id}:${u.search}`;
   if (cache.has(cacheKey)) return cache.get(cacheKey);
 
-  /* fetch Torrentio with device‑specific timeout */
+  /* fetch Torrentio (3 s desktop, 5 s TV) */
   const timeoutMs = isTV ? 5000 : 3000;
   const ctrl = new AbortController();
   const timer = setTimeout(()=>ctrl.abort(), timeoutMs);
@@ -56,12 +56,17 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
 
   const list = isTV ? raw.slice(0,10) : raw;
   let idx = 1;
+
   const streams = list.map(s=>{
     const fromRD = s.url?.includes("/resolve/realdebrid/");
-    if (isTV) {
-      return { ...s, url:`/proxy?u=${encodeURIComponent(s.url)}` };
+    if (isTV){
+      /* wrap only direct-link streams */
+      if (s.url && /^https?:/.test(s.url))
+        s = { ...s, url:`/proxy?u=${encodeURIComponent(s.url)}` };
+      return s;
     }
-    const tag   = fromRD ? "[RD] " : "";
+    /* desktop clean label */
+    const tag = fromRD ? "[RD] " : "";
     const label = `${tag}Stream ${idx++}`;
     return {
       ...s,
@@ -80,11 +85,11 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
                    behaviorHints:{ filename:"Fallback.mp4" } });
 
   const out = { streams };
-  put(cacheKey, out);
+  cachePut(cacheKey, out);
   return out;
 });
 
-/* EXPRESS APP & /proxy stay the same */
+/* EXPRESS APP (unchanged) */
 const app = express();
 
 app.get("/configure",(req,res)=>{
@@ -103,8 +108,6 @@ app.get("/",(_q,r)=>r.redirect("/configure"));
 app.get("/proxy",(req,res)=>{
   try{
     const tgt=new URL(req.query.u);
-    if(!/(real-debrid|debrid-link|rdt|cache)/i.test(tgt.hostname))
-      return res.status(400).send("blocked");
     res.redirect(302,tgt);
   }catch{res.status(400).send("bad url");}
 });

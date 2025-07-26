@@ -1,7 +1,8 @@
-// index.js ‑‑ Universal Stream Renamer v2.3.0
-import express     from "express";
-import http        from "http";
-import { addonBuilder, getRouter } from "stremio-addon-sdk";
+// index.js  (CommonJS)
+const express = require("express");
+const http    = require("http");          // still needed for createServer
+const { addonBuilder, getRouter } =
+      require("stremio-addon-sdk");
 
 const PORT           = process.env.PORT || 7001;
 const DEFAULT_SOURCE = process.env.SOURCE_MANIFEST    || "https://torrentio.strem.fun/manifest.json";

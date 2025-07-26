@@ -9,7 +9,7 @@ const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 
 const PORT           = process.env.PORT || 7001;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
-const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";s
 
 /*─────────────────────────  manifest  ─────────────────────────*/
 const manifest = {

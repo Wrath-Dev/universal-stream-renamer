@@ -1,10 +1,10 @@
 /**************************************************************************
- *  UNIVERSAL STREAM RENAMER  –  v2.3.0
- *  Common‑JS, keeps Stremio SDK’s /configure, adds Chromecast‑safe proxy
+ *  UNIVERSAL STREAM RENAMER  –  v2.3.1
+ *  Common‑JS, keeps original logic, adds /proxy and /configure
  **************************************************************************/
 
-const express                     = require("express");
-const http                        = require("http");
+const express                     = require("express");   // ← NEW
+const http                        = require("http");      // ← NEW
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 
 const PORT           = process.env.PORT || 7001;
@@ -14,7 +14,7 @@ const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-buck
 /*─────────────────────────  manifest  ─────────────────────────*/
 const manifest = {
   id          : "org.universal.stream.renamer",
-  version     : "2.3.0",
+  version     : "2.3.1",
   name        : "Universal Stream Renamer",
   description : "Renames Torrentio streams; Chromecast‑safe same‑origin proxy.",
   resources   : ["stream"],
@@ -112,16 +112,40 @@ function isAllowed(u) {
 
 const app = express();
 
+/* 1️⃣  Chromecast‑safe redirect */
 app.get("/proxy", (req, res) => {
   const u = req.query.u;
   if (!isAllowed(u)) return res.status(400).send("invalid target");
   res.redirect(302, u);
 });
 
-/* mount ALL Stremio add‑on routes (/configure, /manifest.json, /stream/…) */
+/* 2️⃣  Minimal configure page (re‑implements serveHTTP’s one) */
+app.get("/configure", (req, res) => {
+  const manifestUrl = `${req.protocol}://${req.get("host")}/manifest.json`;
+  res.type("html").send(`
+<!doctype html><meta charset=utf-8>
+<title>Universal Stream Renamer – Configure</title>
+<style>
+ body{font-family:sans-serif;max-width:640px;margin:3rem auto;padding:1rem}
+ input,button{font-size:1rem;padding:.6rem;width:100%;box-sizing:border-box;margin:.5rem 0}
+</style>
+<h1>Universal Stream Renamer</h1>
+<p><strong>Add‑on manifest URL:</strong></p>
+<input value="${manifestUrl}" readonly onclick="this.select()">
+<p>
+  <a href="stremio://${manifestUrl}" style="display:inline-block;padding:.8rem 1.2rem;background:#673ab7;color:#fff;text-decoration:none;border-radius:4px">
+    Install&nbsp;in&nbsp;Stremio
+  </a>
+</p>
+<p>If you need to override the <em>source&nbsp;add‑on</em> (e.g.&nbsp;Torrentio),
+open Universal Stream Renamer in Stremio&nbsp;→&nbsp;Settings&nbsp;⚙ →&nbsp;“Source Add‑on&nbsp;URL”.</p>
+`);
+});
+
+/* 3️⃣  Mount Stremio routes (manifest.json, /stream/…, etc.) */
 app.use("/", getRouter(builder.getInterface()));
 
-/* start server */
+/* 4️⃣  Start server */
 http.createServer(app).listen(PORT, () => {
   const external = process.env.RENDER_EXTERNAL_URL || `http://127.0.0.1:${PORT}`;
   console.log(`🚀 Universal Stream Renamer ready at: ${external}/manifest.json`);

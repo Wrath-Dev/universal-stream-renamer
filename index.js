@@ -1,20 +1,22 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – clean numbered names on desktop
+ * UNIVERSAL STREAM RENAMER – 4.1.1
+ * • Clean numbered names on desktop
+ * • Clean `filename` (underscored) so the player title looks tidy
  **************************************************************************/
 
 const express                     = require("express");
 const http                        = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 
-const PORT           = process.env.PORT || 10000;
+const PORT = process.env.PORT || 10000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.1.0",
+  version: "4.1.1",
   name: "Universal Stream Renamer",
-  description: "Clean numbered names on desktop; Chromecast‑safe proxy.",
+  description: "Clean numbered names & filenames; Chromecast‑safe proxy.",
   resources: ["stream"],
   types: ["movie", "series"],
   idPrefixes: ["tt"],
@@ -26,7 +28,7 @@ const manifest = {
 const builder     = new addonBuilder(manifest);
 const userConfigs = {};
 
-/* follow one RD redirect */
+/* follow RD redirect */
 async function resolveRD(u){
   try{
     const r = await fetch(u,{method:"HEAD",redirect:"manual",timeout:4000});
@@ -58,19 +60,23 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
         const fromRD = s.url?.includes("/resolve/realdebrid/");
         if(fromRD) s.url = await resolveRD(s.url);
 
-        /* wrap for TV */
         if(isTV){
           s.url = `/proxy?u=${encodeURIComponent(s.url)}`;
-          return s;                           // keep original name on TV
+          return s;                       // keep original name on TV
         }
 
-        /* desktop/web – give a clean unique name */
+        /* desktop/web: clean name + filename */
         const tag = fromRD ? "[RD] " : "";
+        const cleanName = `${tag}Stream ${counter}`;
         const clean = {
           ...s,
-          name : `${tag}Stream ${counter++}`,
-          behaviorHints:{ ...(s.behaviorHints||{}), filename:`Stream_${counter-1}.mp4` }
+          name : cleanName,
+          behaviorHints:{
+            ...(s.behaviorHints||{}),
+            filename: cleanName.replace(/\s+/g,"_") + ".mp4"
+          }
         };
+        counter++;
         return clean;
       }));
     }
@@ -84,9 +90,10 @@ builder.defineStreamHandler(async ({type,id,config,headers})=>{
   return { streams };
 });
 
-/* express app /configure + /proxy */
+/* express app */
 const app = express();
 
+/* configure page */
 app.get("/configure",(req,res)=>{
   const base=`https://${req.get("host")}/manifest.json`;
   res.type("html").send(`
@@ -96,12 +103,13 @@ app.get("/configure",(req,res)=>{
 function copy(){
   const v=document.getElementById('src').value.trim();
   const url=v? '${base}?sourceAddonUrl=' + encodeURIComponent(v) : '${base}';
-  navigator.clipboard.writeText(url).then(()=>alert('Copied manifest URL'));
+  navigator.clipboard.writeText(url).then(()=>alert('Copied!'));
 }
 </script>`);
 });
 app.get("/",(_q,r)=>r.redirect("/configure"));
 
+/* same-origin proxy */
 app.get("/proxy",(req,res)=>{
   try{
     const tgt=new URL(req.query.u);
@@ -111,7 +119,7 @@ app.get("/proxy",(req,res)=>{
   }catch{res.status(400).send("bad url");}
 });
 
-/* mount SDK router */
+/* SDK router */
 app.use("/", getRouter(builder.getInterface()));
 
 /* start */

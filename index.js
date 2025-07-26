@@ -38,7 +38,7 @@ async function resolveRD (url) {
 /* ─────────── STREAM HANDLER ─────────── */
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const ua   = (headers?.["user-agent"] || "").toLowerCase();
-  const isTV = ua.includes("android") || ua.includes("crkey") || ua.includes("smarttv");
+  const isTV = /stremio.*(android|tv)|crkey|smarttv/.test(ua);
 
   let src = config?.sourceAddonUrl || userConfigs.default || DEFAULT_SOURCE;
   if (config?.sourceAddonUrl) userConfigs.default = src;

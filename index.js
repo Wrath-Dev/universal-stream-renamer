@@ -1,8 +1,9 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.4.0
- * • Captures ?sourceAddonUrl on /manifest.json and remembers it
- * • Decodes it (so %7C ⇒ | and %3D ⇒ =)
- * • Re‑uses it for every /stream/… request → RD links back
+ * UNIVERSAL STREAM RENAMER – 4.4.1
+ *  • Captures ?sourceAddonUrl on /manifest.json
+ *  • Keeps Real‑Debrid token for every /stream/… call
+ *  • Chromecast‑safe same‑origin /proxy
+ *  • Cleans names & strips torrent fields when url is present   ← NEW
  **************************************************************************/
 
 const express = require("express");
@@ -17,10 +18,12 @@ const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-buck
 /* ───── manifest ───── */
 const manifest = {
   id:"org.universal.stream.renamer",
-  version:"4.4.0",
+  version:"4.4.1",
   name:"Universal Stream Renamer",
   description:"Keeps Real‑Debrid token; Chromecast‑safe proxy; clean names.",
-  resources:["stream"], types:["movie","series"], idPrefixes:["tt"],
+  resources:["stream"],
+  types:["movie","series"],
+  idPrefixes:["tt"],
   catalogs:[],
   config:[{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }],
   behaviorHints:{ configurable:true }
@@ -28,31 +31,31 @@ const manifest = {
 
 const builder = addonBuilder(manifest);
 
-/* tiny RAM cache */
+/* tiny RAM cache to avoid hammering Torrentio */
 const cache = new Map(); const TTL = 300_000;
 const put = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k),TTL); };
 
 /* ───── stream handler ───── */
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
 
-  /* remember last manifest URL (may be undefined here) */
+  /* remember last manifest URL (with RD token) */
   if (config?.sourceAddonUrl) global.lastSrc = config.sourceAddonUrl;
 
   const raw = global.lastSrc || DEFAULT_SOURCE;
   const src = decodeURIComponent(raw).replace("stremio://","https://");
 
-  /* build /stream/… keeping the RD token & all options */
+  /* build /stream/… endpoint while keeping query string (RD token etc.) */
   const base = src.replace(/\/manifest\.json$/,"");
   const qStr = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const api  = `${base}/stream/${type}/${id}.json${qStr}`;
 
-  /* detect Chromecast / Android‑TV */
+  /* Chromecast / Android‑TV detection */
   const ua = (headers?.["user-agent"]||"").toLowerCase();
   let isTV = /android|exoplayer|crkey|smarttv|bravia|shield/.test(ua);
-  if (!headers?.["user-agent"]) isTV = true;          // Chromecast has empty UA
-  console.log("\nUA:", headers?.["user-agent"]||"<none>", "→ isTV =", isTV);
+  if (!headers?.["user-agent"]) isTV = true;             // Chromecast has empty UA
+  console.log("\nUA:", headers?.["user-agent"]||"<none>", "isTV:", isTV);
 
-  /* serve from cache if available */
+  /* serve from cache if possible */
   const key = `${type}:${id}:${qStr}`; if (cache.has(key)) return cache.get(key);
 
   /* fetch Torrentio */
@@ -60,11 +63,9 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const r = await fetch(api,{signal:ctrl.signal}).catch(e=>console.error("Fetch",e.message));
   if (!r?.ok){ console.error("HTTP", r?.status); return {streams:[]}; }
 
-  const json = await r.json();
-  const rawStreams = json.streams||[];
+  const rawStreams = (await r.json()).streams || [];
   console.log("Fetched", api, "| total streams:", rawStreams.length);
 
-  /* quick debug: first 5 items */
   rawStreams.slice(0,5).forEach((s,i)=>{
     console.log(`#${i+1}`, s.url ? "url:" : "hash:", (s.url||s.infoHash).slice(0,70));
   });
@@ -74,40 +75,54 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   console.log("Direct links:", direct.length,"| Torrents:", torrents.length);
 
   let list = [...direct, ...torrents];
-  if (isTV) list=list.slice(0,10);                  // faster list for TV
+  if (isTV) list = list.slice(0,10);        // shorter list → faster on TV
 
-  /* map + clean */
-  let n=1;
+  /* map + sanitise */
+  let n = 1;
   const streams = list.map(s=>{
     const label = `Stream ${n++}`;
     const rdTag = s.url?.includes("/resolve/realdebrid/") ? "[RD] " : "";
     const out = {
       ...s,
-      name : rdTag+label,
-      title: rdTag+label,
-      behaviorHints:{ ...(s.behaviorHints||{}), filename:label.replace(/\s+/g,"_")+".mp4" }
+      name : rdTag + label,
+      title: rdTag + label,
+      behaviorHints:{ ...(s.behaviorHints||{}),
+                      filename: label.replace(/\s+/g,"_") + ".mp4" }
     };
-    if (isTV && s.url) out.url = `/proxy?u=${encodeURIComponent(s.url.replace(/^http:/,"https:"))}`;
+
+    /* ⚠️  when we have a direct link, drop torrent‑specific fields */
+    if (out.url){
+      delete out.infoHash;
+      delete out.fileIdx;
+      delete out.sources;
+    }
+
+    /* Chromecast/Android TV needs same‑origin → /proxy */
+    if (isTV && out.url)
+      out.url = `/proxy?u=${encodeURIComponent(out.url.replace(/^http:/,"https:"))}`;
+
     return out;
   });
 
+  /* fallback */
   if (isTV && streams.length===0)
-    streams.push({ name:"Fallback MP4", url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
+    streams.push({ name:"Fallback MP4",
+                   url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
                    behaviorHints:{filename:"Fallback.mp4"} });
 
-  const result = { streams }; put(key,result); return result;
+  const res = { streams }; put(key,res); return res;
 });
 
 /* ───── Express helper & proxy ───── */
 const app = express();
 
-/* ① Intercept /manifest.json to remember sourceAddonUrl */
+/* ① capture ?sourceAddonUrl on /manifest.json */
 app.get("/manifest.json",(req,res,next)=>{
   if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
-  next();   // hand over to stremio router
+  next();
 });
 
-/* configure page (copy button) */
+/* small configure page */
 app.get("/configure",(req,res)=>{
   const base=`https://${req.get("host")}/manifest.json`;
   res.type("html").send(`
@@ -122,12 +137,12 @@ function copy(){
 </script>`);});
 app.get("/",(_q,r)=>r.redirect("/configure"));
 
-/* Chromecast‑safe redirect */
+/* Chromecast‑safe same‑origin redirect */
 app.get("/proxy",(req,res)=>{
   try{ res.redirect(302,new URL(req.query.u)); }
   catch{ res.status(400).send("bad url"); }
 });
 
-/* stremio routes */
+/* mount Stremio routes */
 app.use("/", getRouter(builder.getInterface()));
-http.createServer(app).listen(PORT, ()=>console.log("🚀 add‑on listening on",PORT));
+http.createServer(app).listen(PORT, ()=>console.log("🚀 add‑on listening on port",PORT));

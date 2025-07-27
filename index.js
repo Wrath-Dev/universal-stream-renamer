@@ -1,10 +1,8 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.3.3  (direct links first + raw debug)
- *   • Direct HTTP/RD links shown first; torrents follow (TV capped at 10)
- *   • Clean Stream names on all devices
- *   • TV devices wrap direct URLs with /proxy?u=
- *   • Prints the first 5 raw stream objects so you can inspect “url” vs
- *     “infoHash” — remove the DEBUG block once verified.
+ * UNIVERSAL STREAM RENAMER – 4.3.4
+ * • Direct HTTP/RD links first, torrents after (TV capped at 10)
+ * • TV wraps direct links in /proxy
+ * • DEBUG: prints first 15 raw streams from Torrentio
  **************************************************************************/
 
 const express = require("express");
@@ -12,23 +10,27 @@ const http    = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const AbortController             = global.AbortController || require("abort-controller");
 
-const PORT = process.env.PORT || 10000;
+const PORT           = process.env.PORT || 10000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
+/* ─────────── manifest ─────────── */
 const manifest = {
-  id:"org.universal.stream.renamer",
-  version:"4.3.3",
-  name:"Universal Stream Renamer",
-  description:"Direct links first; torrents fallback; Chromecast‑safe proxy.",
-  resources:["stream"], types:["movie","series"], idPrefixes:["tt"],
-  catalogs:[], behaviorHints:{ configurable:true },
-  config   :[{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }]
+  id          : "org.universal.stream.renamer",
+  version     : "4.3.4",
+  name        : "Universal Stream Renamer",
+  description : "Direct links first; torrents fallback; Chromecast‑safe proxy.",
+  resources   : ["stream"],
+  types       : ["movie", "series"],
+  idPrefixes  : ["tt"],
+  catalogs    : [],
+  behaviorHints: { configurable: true },
+  config      : [{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }]
 };
 
 const builder = addonBuilder(manifest);
 
-/* 5‑minute cache */
+/* 5‑minute RAM cache */
 const cache = new Map();
 const TTL   = 300_000;
 const putCache = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k), TTL); };
@@ -38,10 +40,10 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const uaRaw = headers?.["user-agent"] || "";
   const ua    = uaRaw.toLowerCase();
   let isTV    = /(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(ua);
-  if (!ua) isTV = true;                                // no UA → Chromecast / TV
+  if (!ua) isTV = true;                    // no UA → Chromecast / Android‑TV
   console.log("UA:", uaRaw || "<none>", "→ isTV =", isTV);
 
-  /* manifest / stream source */
+  /* source manifest URL */
   const src = (config?.sourceAddonUrl || DEFAULT_SOURCE).replace("stremio://","https://");
   const u   = new URL(src);
   const cKey= `${type}:${id}:${u.search}`;
@@ -55,30 +57,34 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const res  = await fetch(api, { signal: ctrl.signal }).catch(()=>null);
   clearTimeout(tmr);
 
-  const raw = res?.ok ? (await res.json()).streams || [] : [];
+  let raw = [];
+  if (res?.ok) {
+    const json = await res.json();
 
-  /* ─── DEBUG: peek at first 5 raw items ─── */
-/* ─── DEBUG: full dump of the first stream ─── */
-if (raw.length) {
-  const util = require("util");              // Node’s pretty‑printer
-  console.log("RAW[0] full object ↓");
-  console.log(util.inspect(raw[0], { depth: null, colors: false }));
-  console.log("───────────────────────────────\n");
-} else {
-  console.log("RAW list is empty\n");
-}
+    /* ─── DEBUG: show first 15 streams exactly as returned ─── */
+    console.log("\n=== Torrentio RAW response ===");
+    console.log("total streams:", json.streams?.length ?? 0);
+    json.streams?.slice(0, 15).forEach((s, i) => {
+      const head = s.url
+        ? `url  : ${s.url.slice(0, 70)}${s.url.length > 70 ? "…" : ""}`
+        : `hash : ${s.infoHash?.slice(0, 12) || "none"}`;
+      console.log(`#${(i+1).toString().padEnd(2)} ${head}`);
+    });
+    console.log("=== end RAW ===================\n");
+    /* ─────────────────────────────────────────────────────── */
 
-  /* ─────────────────────────────────────── */
+    raw = json.streams || [];
+  }
 
   /* direct links first, torrents after */
   const direct   = raw.filter(s => s.url && /^https?:/.test(s.url));
   const torrents = raw.filter(s => !(s.url && /^https?:/.test(s.url)));
   let list       = [...direct, ...torrents];
-  if (isTV) list = list.slice(0, 10);                 // cap at 10 rows on TV
+  if (isTV) list = list.slice(0, 10);          // TV shows at most 10 rows
 
   /* map & clean */
-  let idx=1;
-  const streams=list.map(s=>{
+  let idx = 1;
+  const streams = list.map(s => {
     const isDirect = s.url && /^https?:/.test(s.url);
     const isRD     = s.url?.includes("/resolve/realdebrid/");
     if (isTV && isDirect)
@@ -96,8 +102,8 @@ if (raw.length) {
     };
   });
 
-  /* fallback if list empty on TV */
-  if (isTV && streams.length===0)
+  /* fallback for TV when no streams */
+  if (isTV && streams.length === 0)
     streams.push({ name:"Fallback MP4",
                    url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
                    behaviorHints:{ filename:"Fallback.mp4" } });
@@ -134,7 +140,6 @@ app.get("/proxy",(req,res)=>{
   }catch{res.status(400).send("bad url");}
 });
 
-/* SDK router */
 app.use("/", getRouter(builder.getInterface()));
 
 /* start server */

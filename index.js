@@ -1,134 +1,93 @@
-/**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.3.8
- * • NEW: decodeURIComponent() on sourceAddonUrl so pipes/equals aren’t lost
- * • Still keeps entire query string (RD token etc.) when calling Torrentio
- **************************************************************************/
-
-const express = require("express");
-const http    = require("http");
-const { addonBuilder, getRouter } = require("stremio-addon-sdk");
-const AbortController             = global.AbortController || require("abort-controller");
-const util = require("util");
-
-const PORT           = process.env.PORT || 10000;
+const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
-/* ───────── manifest ───────── */
 const manifest = {
-  id:"org.universal.stream.renamer",
-  version:"4.3.8",
-  name:"Universal Stream Renamer",
-  description:"Direct links first (RD token preserved); Chromecast‑safe proxy.",
-  resources:["stream"], types:["movie","series"], idPrefixes:["tt"],
-  catalogs:[], behaviorHints:{ configurable:true },
-  config:[{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }]
+  id: "org.universal.stream.renamer",
+  version: "2.2.1",
+  name: "Universal Stream Renamer",
+  description: "Renames Torrentio streams for desktop; leaves RD tags intact for Android‑TV / Chromecast.",
+  resources: ["stream"],
+  types: ["movie", "series"],
+  idPrefixes: ["tt"],
+  catalogs: [],
+  config: [
+    { key: "sourceAddonUrl", type: "text", title: "Source Add‑on Manifest URL", required: false }
+  ],
+  behaviorHints: { configurable: true }
 };
 
-const builder = addonBuilder(manifest);
+const builder = new addonBuilder(manifest);
+const userConfigs = {};
 
-/* simple 5‑minute RAM cache */
-const cache = new Map(); const TTL = 300_000;
-const put = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k),TTL); };
-
-/* ───────── stream handler ───────── */
-builder.defineStreamHandler(async ({ type, id, config, headers }) => {
-  global.lastSrc = config?.sourceAddonUrl || global.lastSrc;
-  const uaRaw = headers?.["user-agent"] || "";
-  const uaL   = uaRaw.toLowerCase();
-  let isTV    = /(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(uaL);
-  if (!uaRaw) isTV = true;                                   // Chromecast sends no UA
-  console.log("\nUA:", uaRaw || "<none>", "isTV:", isTV);
-
-  /* 1️⃣ decode the URL Stremio passed to us (gets rid of %7C %3D) */
-  const raw = global.lastSrc || DEFAULT_SOURCE;
-  const src = decodeURIComponent(raw).replace("stremio://","https://");
-
-  /* 2️⃣ build stream endpoint – keep query string (RD token, options) */
-  const base = src.replace(/\/manifest\.json$/, "");          // drop only filename
-  const qStr = src.includes("?") ? src.slice(src.indexOf("?")) : "";
-  const api  = `${base}/stream/${type}/${id}.json${qStr}`;
-
-  const cKey = `${type}:${id}:${qStr}`;
-  if (cache.has(cKey)) return cache.get(cKey);
-
-  /* fetch Torrentio */
-  const ctrl = new AbortController();
-  setTimeout(()=>ctrl.abort(), isTV ? 5000 : 4000);
-  const res = await fetch(api, { signal: ctrl.signal }).catch(e=>{console.error("Fetch:",e.message);});
-  if (!res?.ok) { console.error("HTTP", res?.status, res?.statusText); return { streams: [] }; }
-
-  const json = await res.json();
-  console.log("Fetched", api, "| streams:", json.streams?.length ?? 0);
-
-  /* DEBUG: show first 10 lines */
-  (json.streams||[]).slice(0,10).forEach((s,i)=>{
-    const tag = s.url ? "url" : "hash";
-    console.log(`#${(i+1).toString().padEnd(2)} ${tag}:`, (s.url||s.infoHash).slice(0,60));
-  });
-
-  const direct   = (json.streams||[]).filter(s => s.url && /^https?:/.test(s.url));
-  const torrents = (json.streams||[]).filter(s => !(s.url && /^https?:/.test(s.url)));
-
-  console.log("Direct links:", direct.length, "| Torrents:", torrents.length);
-
-  let list = [...direct, ...torrents];
-  if (isTV) list = list.slice(0, 10);                         // speed on TV
-
-  /* map & clean */
-  let idx = 1;
-  const streams = list.map(s => {
-    const isDirect = s.url && /^https?:/.test(s.url);
-    const isRD     = s.url?.includes("/resolve/realdebrid/");
-    if (isTV && isDirect)
-      s = { ...s, url:`/proxy?u=${encodeURIComponent(s.url.replace(/^http:/,"https:"))}` };
-
-    const label = `${isRD ? "[RD] " : ""}Stream ${idx++}`;
-    return {
-      ...s,
-      name : label,
-      title: label,
-      behaviorHints:{ ...(s.behaviorHints||{}),
-                      filename: label.replace(/\s+/g,"_") + ".mp4" }
-    };
-  });
-
-  if (isTV && streams.length === 0)
-    streams.push({ name:"Fallback MP4",
-                   url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
-                   behaviorHints:{ filename:"Fallback.mp4" } });
-
-  const out = { streams };
-  put(cKey, out);
-  return out;
-});
-
-/* ───────── Express helper & proxy ───────── */
-const app = express();
-
-/* simple configure page */
-app.get("/configure",(req,res)=>{
-  const base=`https://${req.get("host")}/manifest.json`;
-  res.type("html").send(`
-<input id=src style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}">
-<button onclick="copy()">Copy manifest URL</button>
-<script>
-function copy(){
-  const v=document.getElementById('src').value.trim();
-  const url=v? '${base}?sourceAddonUrl=' + v : '${base}';
-  navigator.clipboard.writeText(url).then(()=>alert('Copied:\\n'+url));
+/* helper: follow one RD redirect and return final CDN URL */
+async function resolveRD(rdUrl) {
+  try {
+    const res = await fetch(rdUrl, { method: "HEAD", redirect: "manual", timeout: 4000 });
+    return res.headers.get("location") || rdUrl;
+  } catch { return rdUrl; }
 }
-</script>`);});
-app.get("/",(_q,r)=>r.redirect("/configure"));
 
-/* Chromecast‑safe redirect */
-app.get("/proxy",(req,res)=>{
-  try{
-    const tgt=new URL(req.query.u);
-    console.log("/proxy 302 →", tgt.hostname);
-    res.redirect(302, tgt);
-  }catch{ res.status(400).send("bad url"); }
+builder.defineStreamHandler(async ({ type, id, config, headers }) => {
+  const ua   = (headers?.["user-agent"] || "").toLowerCase();
+  const isTV = ua.includes("android") || ua.includes("crkey") || ua.includes("smarttv");
+
+  let src = config?.sourceAddonUrl || userConfigs.default || DEFAULT_SOURCE;
+  if (config?.sourceAddonUrl) userConfigs.default = config.sourceAddonUrl;
+  if (src.startsWith("stremio://")) src = src.replace("stremio://", "https://");
+
+  const tUrl = `${src.replace(/\/manifest\.json$/, "")}/stream/${type}/${id}.json`;
+  console.log(`🔗 Fetching ${tUrl}`);
+
+  let streams = [];
+  try {
+    const r = await fetch(tUrl, { timeout: 4000 });
+    if (r.ok) {
+      const { streams: raw = [] } = await r.json();
+
+      streams = await Promise.all(
+        raw.map(async (st, i) => {
+          /* resolve RD redirect */
+          if (st.url && st.url.includes("/resolve/realdebrid/"))
+            st.url = await resolveRD(st.url);
+
+          /* rename ONLY for desktop/web */
+          if (!isTV) {
+            const rdTag = st.name.includes("[RD") ? st.name.match(/\[RD[^\]]*\]/)[0] : "[RD]";
+            st = {
+              ...st,
+              name : `${rdTag} Stream ${i + 1}`,
+              title: "Generic Stream",
+              description: `Stream ${i + 1}`,
+              behaviorHints: {
+                ...(st.behaviorHints || {}),
+                filename: `Stream_${i + 1}.mp4`
+              }
+            };
+          }
+          return st;
+        })
+      );
+    }
+  } catch (e) {
+    console.error("⚠️ Torrentio fetch failed:", e.message);
+  }
+
+  /* fallback only when TV and list empty */
+  if (isTV && streams.length === 0) {
+    streams.push({
+      name : "Direct MP4 (Test)",
+      title: "Fallback Stream",
+      url  : FALLBACK_MP4,
+      behaviorHints: { filename: "Fallback.mp4" }
+    });
+  }
+
+  return { streams };
 });
 
-app.use("/", getRouter(builder.getInterface()));
-http.createServer(app).listen(PORT, ()=>console.log("🚀 add‑on listening on", PORT));
+const PORT = process.env.PORT || 7001;
+serveHTTP(builder.getInterface(), { port: PORT });
+
+const external = process.env.RENDER_EXTERNAL_URL || `http://127.0.0.1:${PORT}`;
+console.log(`🚀 Universal Stream Renamer available at: ${external}/manifest.json`);

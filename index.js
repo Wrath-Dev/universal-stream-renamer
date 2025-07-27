@@ -104,6 +104,8 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
     return out;
   });
 
+  console.log("Mapped[0] handed to Stremio ↓\n", streams[0]);
+
   /* fallback */
   if (isTV && streams.length===0)
     streams.push({ name:"Fallback MP4",

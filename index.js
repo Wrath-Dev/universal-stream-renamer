@@ -58,13 +58,16 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const raw = res?.ok ? (await res.json()).streams || [] : [];
 
   /* ─── DEBUG: peek at first 5 raw items ─── */
-  console.log("RAW[0‑4] ===>");
-  raw.slice(0,5).forEach((s,i)=>{
-    const head = s.url ? ("url:" + s.url.slice(0,60)+(s.url.length>60?"…":""))
-                       : ("infoHash:"+(s.infoHash?.slice(0,10) || "none"));
-    console.log(`  #${i+1}`, head, s.name || "");
-  });
-  console.log("<=== end\n");
+/* ─── DEBUG: full dump of the first stream ─── */
+if (raw.length) {
+  const util = require("util");              // Node’s pretty‑printer
+  console.log("RAW[0] full object ↓");
+  console.log(util.inspect(raw[0], { depth: null, colors: false }));
+  console.log("───────────────────────────────\n");
+} else {
+  console.log("RAW list is empty\n");
+}
+
   /* ─────────────────────────────────────── */
 
   /* direct links first, torrents after */

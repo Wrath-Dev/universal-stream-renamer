@@ -59,6 +59,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers })=>{
       behaviorHints:{...(s.behaviorHints||{}),
                      filename:label.replace(/\s+/g,"_")+".mp4"}};
   });
+  console.log(streams.slice(0,3))
 
   if(isTV&&streams.length===0)
     streams.push({name:"Fallback MP4",

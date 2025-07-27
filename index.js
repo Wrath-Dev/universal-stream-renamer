@@ -1,5 +1,7 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.3.6  (maximum logging)
+ * UNIVERSAL STREAM RENAMER – 4.3.7
+ * • Keeps RD token ⇒ Torrentio again returns "url:" rows
+ * • Verbose logging (RAW streams, filter counts, first 2 mapped rows)
  **************************************************************************/
 
 const express = require("express");
@@ -14,9 +16,9 @@ const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-buck
 
 const manifest = {
   id:"org.universal.stream.renamer",
-  version:"4.3.6",
-  name:"Universal Stream Renamer (verbose debug)",
-  description:"Logs full Torrentio JSON + filtering details.",
+  version:"4.3.7",
+  name:"Universal Stream Renamer (RD token preserved)",
+  description:"Direct links first; torrents fallback; Chromecast‑safe proxy.",
   resources:["stream"], types:["movie","series"], idPrefixes:["tt"],
   catalogs:[], behaviorHints:{ configurable:true },
   config:[{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }]
@@ -25,79 +27,84 @@ const manifest = {
 const builder = addonBuilder(manifest);
 
 /* 5‑minute cache */
-const cache=new Map(); const TTL=300_000;
-const cacheSet=(k,v)=>{cache.set(k,v);setTimeout(()=>cache.delete(k),TTL);};
+const cache = new Map(); const TTL = 300_000;
+const cacheSet = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k),TTL); };
 
-builder.defineStreamHandler(async({type,id,config,headers})=>{
-  const ua=headers?.["user-agent"]||""; const uaL=ua.toLowerCase();
-  let isTV=/(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(uaL);
-  if(!ua) isTV=true;
-  console.log("\nUA:",ua||"<none>",", isTV:",isTV);
+builder.defineStreamHandler(async ({ type, id, config, headers })=>{
+  const uaRaw = headers?.["user-agent"] || "";
+  const ua    = uaRaw.toLowerCase();
+  let isTV    = /(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(ua);
+  if (!ua) isTV = true;
+  console.log("\nUA:", uaRaw || "<none>", ", isTV:", isTV);
 
-  const src=(config?.sourceAddonUrl||DEFAULT_SOURCE).replace("stremio://","https://");
-  const u=new URL(src); const key=`${type}:${id}:${u.search}`;
-  if(cache.has(key)) return cache.get(key);
+  /* ----- build API URL while keeping RD token ----- */
+  const src  = (config?.sourceAddonUrl || DEFAULT_SOURCE).replace("stremio://","https://");
+  const base = src.replace(/\/manifest\.json$/, "");                 // strip filename only
+  const q    = src.includes("?") ? src.slice(src.indexOf("?")) : ""; // keep entire query string
+  const api  = `${base}/stream/${type}/${id}.json${q}`;              // RD token preserved
+  /* ----------------------------------------------- */
 
-  const api=`${u.origin}/stream/${type}/${id}.json${u.search}`;
-  const ctrl=new AbortController();
-  const t=setTimeout(()=>ctrl.abort(),isTV?5000:4000);
-  const res=await fetch(api,{signal:ctrl.signal}).catch(e=>{console.error("Fetch error:",e.message);return null;});
-  clearTimeout(t);
+  const cacheKey = `${type}:${id}:${q}`;
+  if (cache.has(cacheKey)) return cache.get(cacheKey);
 
-  if(!res?.ok){
+  const ctrl = new AbortController();
+  setTimeout(()=>ctrl.abort(), isTV ? 5000 : 4000);
+  const res  = await fetch(api, { signal: ctrl.signal }).catch(e=>{console.error("Fetch error:",e.message);return null;});
+  if (!res?.ok){
     console.error("HTTP",res?.status,res?.statusText,"for",api);
-    return {streams:[]};
+    return { streams: [] };
   }
-  const json=await res.json();
-  console.log("Fetched",api,
-              "| status:",res.status,
-              "| bytes:",res.headers.get("content-length")||"unknown",
-              "| total streams:",json.streams?.length||0);
 
-  /* ---- print first 25 raw stream objects ---- */
-  console.log("----- RAW Streams (up to 25) -----");
+  const json = await res.json();
+  console.log("Fetched", api, "| streams:", json.streams?.length ?? 0);
+
+  /* ----- DEBUG: list first 25 raw streams ----- */
   (json.streams||[]).slice(0,25).forEach((s,i)=>{
-    console.log(`#${i+1}`, util.inspect(s,{depth:1,colors:false,maxArrayLength:5}));
+    const head = s.url ? `url:${s.url.slice(0,60)}…` : `hash:${s.infoHash?.slice(0,12)}`;
+    console.log(`#${i+1}`.padEnd(4), head);
   });
-  if((json.streams||[]).length>25) console.log("…", (json.streams.length-25), "more");
   console.log("----- end RAW -----");
+  /* -------------------------------------------- */
 
-  const raw=json.streams||[];
+  const direct   = (json.streams||[]).filter(s=>s.url && /^https?:/.test(s.url));
+  const torrents = (json.streams||[]).filter(s=>!(s.url && /^https?:/.test(s.url)));
 
-  const direct  = raw.filter(s=>s.url && /^https?:/.test(s.url));
-  const torrents= raw.filter(s=>!(s.url && /^https?:/.test(s.url)));
+  console.log("Direct links:", direct.length, "| Torrents:", torrents.length);
 
-  console.log("Direct links:",direct.length,"| Torrents:",torrents.length);
+  let list = [...direct, ...torrents];
+  if (isTV) list = list.slice(0, 10);
 
-  let list=[...direct,...torrents];
-  if(isTV) list=list.slice(0,10);
+  let idx = 1;
+  const streams = list.map(s=>{
+    const isDirect = s.url && /^https?:/.test(s.url);
+    const isRD     = s.url?.includes("/resolve/realdebrid/");
+    if (isTV && isDirect)
+      s = { ...s, url:`/proxy?u=${encodeURIComponent(s.url.replace(/^http:/,"https:"))}` };
 
-  let idx=1;
-  const streams=list.map(s=>{
-    const isDirect=s.url && /^https?:/.test(s.url);
-    const isRD=s.url?.includes("/resolve/realdebrid/");
-    if(isTV && isDirect)
-      s={...s,url:`/proxy?u=${encodeURIComponent(s.url.replace(/^http:/,"https:"))}`};
-    const label=`${isRD?"[RD] ":""}Stream ${idx++}`;
-    return {...s,name:label,title:label,
-      behaviorHints:{...(s.behaviorHints||{}),
-                     filename:label.replace(/\s+/g,"_")+".mp4"}};
+    const label = `${isRD ? "[RD] " : ""}Stream ${idx++}`;
+    return {
+      ...s,
+      name : label,
+      title: label,
+      behaviorHints:{ ...(s.behaviorHints||{}), filename: label.replace(/\s+/g,"_")+".mp4" }
+    };
   });
 
-  console.log("First 2 mapped streams:",util.inspect(streams.slice(0,2),{depth:2,colors:false}));
+  console.log("First 2 mapped:", util.inspect(streams.slice(0,2), { depth:2, colors:false }));
 
-  if(isTV && streams.length===0)
-    streams.push({name:"Fallback MP4",
-                  url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
-                  behaviorHints:{filename:"Fallback.mp4"}});
+  if (isTV && streams.length === 0)
+    streams.push({ name:"Fallback MP4",
+                   url:`/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
+                   behaviorHints:{ filename:"Fallback.mp4" } });
 
-  const out={streams};
-  cacheSet(key,out);
+  const out = { streams };
+  cacheSet(cacheKey, out);
   return out;
 });
 
-/* Express + /proxy unchanged */
-const app=express();
+/* Express + /proxy (unchanged) */
+const app = express();
+
 app.get("/configure",(req,res)=>{
   const base=`https://${req.get("host")}/manifest.json`;
   res.type("html").send(`<input id=src style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}">
@@ -110,6 +117,14 @@ function copy(){
 }
 </script>`);});
 app.get("/",(_q,r)=>r.redirect("/configure"));
-app.get("/proxy",(req,res)=>{try{const tgt=new URL(req.query.u);console.log("/proxy 302 →",tgt.hostname);res.redirect(302,tgt);}catch{res.status(400).send("bad");}});
-app.use("/",getRouter(builder.getInterface()));
-http.createServer(app).listen(PORT,()=>console.log("🚀 add‑on listening on port",PORT));
+
+app.get("/proxy",(req,res)=>{
+  try{
+    const tgt=new URL(req.query.u);
+    console.log("/proxy 302 →", tgt.hostname);
+    res.redirect(302,tgt);
+  }catch{res.status(400).send("bad url");}
+});
+
+app.use("/", getRouter(builder.getInterface()));
+http.createServer(app).listen(PORT, ()=>console.log("🚀 add‑on listening on", PORT));

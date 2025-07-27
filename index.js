@@ -33,6 +33,7 @@ const put = (k,v)=>{ cache.set(k,v); setTimeout(()=>cache.delete(k),TTL); };
 
 /* ───────── stream handler ───────── */
 builder.defineStreamHandler(async ({ type, id, config, headers }) => {
+  global.lastSrc = config?.sourceAddonUrl || global.lastSrc;
   const uaRaw = headers?.["user-agent"] || "";
   const uaL   = uaRaw.toLowerCase();
   let isTV    = /(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(uaL);
@@ -40,7 +41,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   console.log("\nUA:", uaRaw || "<none>", "isTV:", isTV);
 
   /* 1️⃣ decode the URL Stremio passed to us (gets rid of %7C %3D) */
-  const raw = config?.sourceAddonUrl || DEFAULT_SOURCE;
+  const raw = global.lastSrc || DEFAULT_SOURCE;
   const src = decodeURIComponent(raw).replace("stremio://","https://");
 
   /* 2️⃣ build stream endpoint – keep query string (RD token, options) */

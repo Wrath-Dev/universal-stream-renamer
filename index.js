@@ -1,9 +1,7 @@
 /**************************************************************************
- * UNIVERSAL STREAM RENAMER – 4.3.7  (RD token preserved)
- * • Builds /stream/… URL by stripping only “/manifest.json”, leaving
- *   *everything after* “?” intact ⇒ RD token reaches Torrentio.
- * • Direct links first, torrents fallback (TV list capped at 10 rows)
- * • Verbose logging so you can verify `url:` rows re‑appear
+ * UNIVERSAL STREAM RENAMER – 4.3.8
+ * • NEW: decodeURIComponent() on sourceAddonUrl so pipes/equals aren’t lost
+ * • Still keeps entire query string (RD token etc.) when calling Torrentio
  **************************************************************************/
 
 const express = require("express");
@@ -19,14 +17,11 @@ const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-buck
 /* ───────── manifest ───────── */
 const manifest = {
   id:"org.universal.stream.renamer",
-  version:"4.3.7",
+  version:"4.3.8",
   name:"Universal Stream Renamer",
   description:"Direct links first (RD token preserved); Chromecast‑safe proxy.",
-  resources:["stream"],
-  types:["movie","series"],
-  idPrefixes:["tt"],
-  catalogs:[],
-  behaviorHints:{ configurable:true },
+  resources:["stream"], types:["movie","series"], idPrefixes:["tt"],
+  catalogs:[], behaviorHints:{ configurable:true },
   config:[{ key:"sourceAddonUrl", type:"text", title:"Source Add‑on Manifest URL" }]
 };
 
@@ -44,12 +39,14 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   if (!uaRaw) isTV = true;                                   // Chromecast sends no UA
   console.log("\nUA:", uaRaw || "<none>", "isTV:", isTV);
 
-  /* ----- keep entire query string so RD token survives ----- */
-  const src  = (config?.sourceAddonUrl || DEFAULT_SOURCE).replace("stremio://","https://");
-  const base = src.replace(/\/manifest\.json$/, "");          // drop only the filename
+  /* 1️⃣ decode the URL Stremio passed to us (gets rid of %7C %3D) */
+  const raw = config?.sourceAddonUrl || DEFAULT_SOURCE;
+  const src = decodeURIComponent(raw).replace("stremio://","https://");
+
+  /* 2️⃣ build stream endpoint – keep query string (RD token, options) */
+  const base = src.replace(/\/manifest\.json$/, "");          // drop only filename
   const qStr = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const api  = `${base}/stream/${type}/${id}.json${qStr}`;
-  /* --------------------------------------------------------- */
 
   const cKey = `${type}:${id}:${qStr}`;
   if (cache.has(cKey)) return cache.get(cKey);
@@ -63,10 +60,10 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   const json = await res.json();
   console.log("Fetched", api, "| streams:", json.streams?.length ?? 0);
 
-  /* DEBUG: list first 10 rows */
+  /* DEBUG: show first 10 lines */
   (json.streams||[]).slice(0,10).forEach((s,i)=>{
     const tag = s.url ? "url" : "hash";
-    console.log(`#${i+1}`.padEnd(3), tag + ":", (s.url||s.infoHash).slice(0,60));
+    console.log(`#${(i+1).toString().padEnd(2)} ${tag}:`, (s.url||s.infoHash).slice(0,60));
   });
 
   const direct   = (json.streams||[]).filter(s => s.url && /^https?:/.test(s.url));
@@ -75,7 +72,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers }) => {
   console.log("Direct links:", direct.length, "| Torrents:", torrents.length);
 
   let list = [...direct, ...torrents];
-  if (isTV) list = list.slice(0, 10);                         // limit rows on TV for speed
+  if (isTV) list = list.slice(0, 10);                         // speed on TV
 
   /* map & clean */
   let idx = 1;
@@ -117,7 +114,7 @@ app.get("/configure",(req,res)=>{
 <script>
 function copy(){
   const v=document.getElementById('src').value.trim();
-  const url=v? '${base}?sourceAddonUrl=' + encodeURIComponent(v) : '${base}';
+  const url=v? '${base}?sourceAddonUrl=' + v : '${base}';
   navigator.clipboard.writeText(url).then(()=>alert('Copied:\\n'+url));
 }
 </script>`);});

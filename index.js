@@ -1,4 +1,12 @@
 // index.js
+const { execSync }      = require('child_process');
+// Check for ffmpeg presence
+try {
+  console.log(execSync('ffmpeg -version').toString().split('\n')[0]);
+} catch (err) {
+  console.error('⚠️  ffmpeg not found in PATH:', err.message);
+}
+
 const express             = require("express");
 const http                = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
@@ -8,6 +16,14 @@ const fetch               = global.fetch || require("node-fetch");
 const PORT           = process.env.PORT || 7000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+
+// Filenames of Torrentio static error videos
+const ERROR_MARKERS = [
+  'failed_infringement_v2.mp4',
+  'failed_access_v2.mp4',
+  'failed_size_v2.mp4',
+  'failed_too_big_v2.mp4'
+];
 
 // ── Manifest & Builder ───────────────────────────────────────────────────────
 const manifest = {
@@ -35,9 +51,8 @@ function put(key, val){
 // ── Stream Handler ──────────────────────────────────────────────────────────
 builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   const uaRaw = headers?.["user-agent"] || "";
-  const uaL   = uaRaw.toLowerCase();
-  // Only flag as TV/Cast if UA matches a known Cast/TV pattern:
-  const isTV = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
+  // Detect Chromecast/TV by UA sniff or blank UA
+  const isTV = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw) || !uaRaw;
   console.log(`[${new Date().toISOString()}] Stream request: type=${type}, id=${id}, UA="${uaRaw}", isTV=${isTV}`);
 
   // Determine source manifest URL
@@ -46,19 +61,19 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   global.lastSrc = src;
 
   // Build API URL
-  const base   = src.replace(/\/manifest\.json$/,"");
-  const qStr   = src.includes("?") ? src.slice(src.indexOf("?")) : "";
+  const base   = src.replace(/\/manifest\.json$/,'');
+  const qStr   = src.includes('?') ? src.slice(src.indexOf('?')) : '';
   const apiUrl = `${base}/stream/${type}/${id}.json${qStr}`;
 
   // Cache lookup
   const cacheKey = `${type}:${id}:${qStr}`;
   if (cache.has(cacheKey)) {
-    console.log("→ Cache hit");
+    console.log('→ Cache hit');
     return cache.get(cacheKey);
   }
 
   // Fetch with timeout
-  const timeoutMs = isTV ? 10_000 : 4_000;
+  const timeoutMs = isTV ? 10000 : 4000;
   const ctrl      = new AbortController();
   setTimeout(()=>ctrl.abort(), timeoutMs);
 
@@ -67,7 +82,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
     res = await fetch(apiUrl, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
   } catch(err) {
-    console.error("Fetch error:", err.message);
+    console.error('Fetch error:', err.message);
     return { streams: [] };
   }
 
@@ -75,71 +90,86 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   console.log(`→ Fetched ${json.streams?.length||0} streams`);
 
   // Filter to only Real‑Debrid links
-  let streams = (json.streams || [])
-    .filter(s => s.url && s.url.includes("/resolve/realdebrid/"));
-
-  // If TV, only keep .mp4 URLs
+  let streams = (json.streams || []).filter(s => s.url && s.url.includes('/resolve/realdebrid/'));
+  // If TV, only keep .mp4
   if (isTV) {
     streams = streams.filter(s => /\.mp4($|\?)/i.test(s.url));
     console.log(`→ ${streams.length} .mp4 links for TV`);
   }
 
-  // Map to Stremio format
+  // Map to Stremio format with error interception
   const mapped = streams.map((s, i) => {
-    // Derive extension from URL
-    const m = s.url.match(/\.([a-z0-9]+)(?:\?|$)/i);
-    const ext = m ? m[1].toLowerCase() : "mp4";
-
+    const url = s.url.replace(/^http:/,'https:');
+    // Intercept static errors
+    const fname = url.split('/').pop().toLowerCase();
+    if (ERROR_MARKERS.includes(fname)) {
+      console.log(`→ Stream ${i+1} is static error (${fname}), using fallback`);
+      return {
+        name: 'Fallback Video',
+        title:'Fallback Video',
+        url:  FALLBACK_MP4,
+        behaviorHints: {
+          filename:    'Fallback.mp4',
+          notWebReady: false,
+          container:   'mp4',
+          videoCodec:  'h264',
+          contentType: 'video/mp4',
+        }
+      };
+    }
+    // Derive ext
+    const m   = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+    const ext = m ? m[1].toLowerCase() : 'mp4';
     const label = `[RD] Stream ${i+1}`;
 
     if (isTV) {
-      // Tell Stremio to transcode to HLS for Chromecast
+      // Chromecast/TV: HLS transcode
       return {
         name:  label,
         title: label,
-        url:   s.url.replace(/^http:/, "https:"),
+        url,
         behaviorHints: {
-          filename:    `${label.replace(/\s+/g,"_")}.mp4`,
-          notWebReady: true,                    // trigger FFmpeg→HLS
-          container:   "mp4",
-          videoCodec:  "h264",
-          audioCodec:  "aac",
-          contentType: "application/vnd.apple.mpegurl",
-          bingeGroup:  "renamerGroup",
+          filename:    `${label.replace(/\s+/g,'_')}.mp4`,
+          notWebReady: true,
+          container:   'mp4',
+          videoCodec:  'h264',
+          audioCodec:  'aac',
+          contentType: 'application/vnd.apple.mpegurl',
+          bingeGroup:  'renamerGroup',
         },
       };
     }
 
-    // Desktop: serve raw container
+    // Desktop: raw
     return {
       name:  label,
       title: label,
-      url:   s.url.replace(/^http:/, "https:"),
+      url,
       behaviorHints: {
-        filename:    `${label.replace(/\s+/g,"_")}.${ext}`,
+        filename:    `${label.replace(/\s+/g,'_')}.${ext}`,
         notWebReady: false,
         container:   ext,
-        videoCodec:  ext === "mkv" ? "h265" : "h264",
-        contentType: `video/${ext}`,
-        bingeGroup:  "renamerGroup",
+        videoCodec:  ext==='mkv'?'h265':'h264',
+        contentType:`video/${ext}`,
+        bingeGroup: 'renamerGroup',
       },
     };
   });
 
   // Fallback if none
   if (!mapped.length) {
-    console.warn("No streams → using fallback MP4");
+    console.warn('→ No streams → using fallback MP4');
     mapped.push({
-      name:  "Fallback MP4",
-      title: "Fallback MP4",
-      url:   FALLBACK_MP4,
+      name: 'Fallback MP4',
+      title:'Fallback MP4',
+      url:  FALLBACK_MP4,
       behaviorHints: {
-        filename:    "Fallback.mp4",
+        filename:    'Fallback.mp4',
         notWebReady: false,
-        container:   "mp4",
-        videoCodec:  "h264",
-        contentType: "video/mp4",
-      },
+        container:   'mp4',
+        videoCodec:  'h264',
+        contentType: 'video/mp4',
+      }
     });
   }
 
@@ -153,39 +183,37 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
 const app = express();
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
-  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,POST");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Authorization");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin||'*');
+  res.setHeader('Access-Control-Allow-Methods','GET,OPTIONS,POST');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type,Accept,Authorization');
+  if (req.method==='OPTIONS') return res.sendStatus(200);
   if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
   next();
 });
-app.get("/", (_r, s) => s.redirect(302, "/configure"));
-app.get(["/configure","/configure/"], (r, s) => {
-  const base = `${r.protocol}://${r.get("host")}/manifest.json`;
-  const val  = global.lastSrc || "";
-  s.type("html").send(`
+app.get('/',(_r,s)=>s.redirect(302,'/configure'));
+app.get(['/configure','/configure/'],(r,s)=>{
+  const base = `${r.protocol}://${r.get('host')}/manifest.json`;
+  const val  = global.lastSrc||'';
+  s.type('html').send(`
     <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${val}">
     <button onclick="copy()">Copy Manifest URL</button>
     <a id="testLink" href="#" style="display:block;margin-top:1rem;">Test Manifest URL</a>
     <script>
       function copy(){
         const v = document.getElementById('src').value.trim();
-        const url = v
-          ? '${base}?sourceAddonUrl=' + encodeURIComponent(v)
-          : '${base}';
+        const url = v? '${base}?sourceAddonUrl='+encodeURIComponent(v):'${base}';
         navigator.clipboard.writeText(url);
-        document.getElementById('testLink').href = url;
+        document.getElementById('testLink').href=url;
       }
     </script>
   `);
 });
-app.get("/manifest.json", (_r, s, n) => { console.log("Serving manifest.json"); n(); });
-app.get("/health",       (_r, s) => s.send("OK"));
-app.use("/", getRouter(builder.getInterface()));
-app.use((_r, s) => s.status(404).send("Not Found"));
+app.get('/manifest.json',(_r,s,n)=>{console.log('Serving manifest.json');n();});
+app.get('/health',(_r,s)=>s.send('OK'));
+app.use('/',getRouter(builder.getInterface()));
+app.use((_r,s)=>s.status(404).send('Not Found'));
 
-http.createServer(app).listen(PORT, () => {
+http.createServer(app).listen(PORT,()=>{
   console.log(`🚀 Add‑on listening on port ${PORT}`);
   console.log(`→ Local configure: http://localhost:${PORT}/configure`);
   console.log(`→ Remote: https://<your-domain>/configure`);

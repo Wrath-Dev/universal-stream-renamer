@@ -1,115 +1,112 @@
-/**************************************************************************
- * UNIVERSAL STREAM RENAMER – “scraper” variant
- *
- *  • Relies on torrent‑io‑scraper to talk to RD
- *  • Still returns the simple Stream‑1 / Stream‑2 names you liked
- *  • Keeps Chromecast proxy + /configure working
- **************************************************************************/
+// index.js  –  Universal Stream Renamer (lightweight RD version)
+// --------------------------------------------------------------
 
-import express          from "express";
-import http             from "http";
-import { addonBuilder, getRouter } from "stremio-addon-sdk";
-import { scraper }      from "torrentio-scraper";          // <-- NEW
-                                                           //     (default export changed to named in latest version)
-
-/* ───────────────────────── manifest ───────────────────────── */
+import express from 'express';
+import http from 'http';
+import fetch from 'node-fetch';
+import { addonBuilder, getRouter } from 'stremio-addon-sdk';
 
 const PORT           = process.env.PORT || 10000;
-const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json"; // only used if user leaves box empty
-const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
+const FALLBACK_MP4   =
+  'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
 
+/* ───────────── manifest ───────────── */
 const manifest = {
-  id:          "org.universal.stream.renamer",
-  version:     "4.0.0",
-  name:        "Universal Stream Renamer",
-  description: "Torrentio‑scraper + Real‑Debrid → neat Stremio streams",
-  resources :  ["stream"],
-  types     :  ["movie","series"],
-  idPrefixes:  ["tt"],
-  catalogs  :  [],
-  config    : [{
-    key   : "sourceAddonUrl",
-    type  : "text",
-    title : "Torrentio manifest (incl. RD key)",
-    required : false
-  }],
-  behaviorHints:{ configurable:true }
+  id          : 'org.universal.stream.renamer',
+  version     : '4.0.0',
+  name        : 'Universal Stream Renamer',
+  description : 'Shows Real‑Debrid direct links from Torrentio and hides long titles.',
+  resources   : ['stream'],
+  types       : ['movie', 'series'],
+  idPrefixes  : ['tt'],
+  catalogs    : [],
+  config      : [
+    { key: 'sourceAddonUrl',
+      type: 'text',
+      title: 'Source Add‑on Manifest URL (your Torrentio link)',
+      required: true }
+  ],
+  behaviorHints: { configurable: true }
 };
 
-const builder = new addonBuilder(manifest);
+const builder     = new addonBuilder(manifest);
 const userConfigs = Object.create(null);
 
-/* ───────────────────────── helper ───────────────────────── */
-
-function isTV(ua="") {
+/* ───────── helper: same‑origin redirect for Chromecast ───────── */
+function needsProxy(ua) {
+  if (!ua) return true;                // Chromecast sends almost nothing
   ua = ua.toLowerCase();
-  return ua.includes("android") || ua.includes("crkey") || ua.includes("smarttv");
+  return ua.includes('android') ||
+         ua.includes('crkey')  ||
+         ua.includes('smarttv');
 }
 
-/* if you still want to keep the single‑hop redirect for TVs */
-function sameOrigin(tv, finalUrl, host) {
-  return tv
-    ? `https://${host}/proxy?u=${encodeURIComponent(finalUrl)}`
-    : finalUrl;
-}
+/* ───────── stream handler ───────── */
+builder.defineStreamHandler(async ({ type, id, config, headers }) => {
+  const ua   = headers?.['user-agent'] || '';
+  const isTV = needsProxy(ua);
 
-/* ───────────────── stream handler ───────────────── */
+  // 1. work out which Torrentio manifest to call
+  let src = config?.sourceAddonUrl || userConfigs.default;
+  if (!src)
+    return { streams: [] };                    // addon not configured yet
 
-builder.defineStreamHandler(async ({type, id, config, headers})=>{
-  const tv = isTV(headers?.["user-agent"]||"");
-
-  /* where to scrape from   ────────── */
-  let src = config?.sourceAddonUrl || userConfigs.default || DEFAULT_SOURCE;
   if (config?.sourceAddonUrl) userConfigs.default = src;
-  if (src.startsWith("stremio://")) src = src.replace("stremio://","https://");
+  if (src.startsWith('stremio://')) src = src.replace('stremio://', 'https://');
 
-  /* call torrent‑io‑scraper (returns exactly the same JSON the
-     Torrentio HTTP endpoint would give you, but *already enriched*
-     with Real‑Debrid direct URLs if the key is present)             */
-  const { streams: raw = [] } = await scraper.streams({
-    manifestUrl : src,
-    imdbId      : id,       // scraper figures out if it’s “tt123…” or “tt:season:episode”
-    type
-  }).catch(e=>{
-    console.error("scraper error:", e.message||e);
-    return { streams : [] };
-  });
+  const url = `${src.replace(/\/manifest\.json$/, '')}/stream/${type}/${id}.json`;
 
-  /* translate to Stremio streams */
-  const host = headers?.host || process.env.RENDER_EXTERNAL_HOSTNAME || `127.0.0.1:${PORT}`;
+  /* 2. fetch Torrentio */
+  const res   = await fetch(url);
+  const json  = await res.json();
+  const raw   = Array.isArray(json.streams) ? json.streams : [];
 
-  const streams = raw
-    .filter(s => s.url)               // ONLY keep ones that have a direct link
-    .map((s, i) => ({
-       name : `[RD] Stream ${i+1}`,
-       title: `[RD] Stream ${i+1}`,
-       url  : sameOrigin(tv, s.url, host),
-       behaviorHints : { filename:`Stream_${i+1}.mp4` }
-    }));
+  /* 3. keep only direct links (url present) */
+  const direct = raw.filter(s => typeof s.url === 'string' && s.url.startsWith('http'));
 
-  /* fallback for TV w/ nothing */
-  if (tv && streams.length===0) {
+  /* 4. map / rename */
+  const streams = direct.map((st, i) => ({
+    name : `[RD] Stream ${i + 1}`,
+    title: `[RD] Stream ${i + 1}`,
+    url  : isTV ? `/proxy?u=${encodeURIComponent(st.url)}` : st.url,
+    behaviorHints: {
+      filename: `Stream_${i + 1}.mp4`
+    }
+  }));
+
+  /* 5. fallback for TV if nothing */
+  if (isTV && !streams.length) {
     streams.push({
-      name:"Fallback",title:"Fallback",
-      url : sameOrigin(tv, FALLBACK_MP4, host),
-      behaviorHints:{ filename:"Fallback.mp4" }
+      name : 'Fallback MP4',
+      title: 'Fallback Stream',
+      url  : `/proxy?u=${encodeURIComponent(FALLBACK_MP4)}`,
+      behaviorHints: { filename: 'Fallback.mp4' }
     });
   }
 
   return { streams };
 });
 
-/* ───────────────── Express wiring (router FIRST!) ───────────────── */
-
+/* ───────── minimal Express wrapper ───────── */
 const app = express();
-app.use("/", getRouter(builder.getInterface()));
 
-app.get("/proxy",(req,res)=>{
-  const u=req.query.u;
-  res.redirect(302,u);
+app.get('/proxy', (req, res) => {
+  const target = req.query.u;
+  // allow only http/https just to be safe
+  try {
+    const { protocol } = new URL(target);
+    if (!['http:', 'https:'].includes(protocol)) throw 'bad proto';
+    res.redirect(302, target);
+  } catch {
+    res.status(400).send('invalid url');
+  }
 });
-app.get("/",(_req,res)=>res.redirect("/configure"));
 
-http.createServer(app).listen(PORT, ()=>
-  console.log(`🚀 add‑on ready on https://127.0.0.1:${PORT}/manifest.json`)
+app.get('/', (_req, res) => res.redirect('/configure'));
+app.use('/', getRouter(builder.getInterface()));
+
+/* ───────── start ───────── */
+http.createServer(app).listen(PORT, () =>
+  console.log(`🚀 addon ready at http://127.0.0.1:${PORT}/manifest.json\n` +
+              `ℹ︎ open /configure in a browser to enter your Torrentio link`)
 );

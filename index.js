@@ -1,9 +1,9 @@
 // index.js
-const express       = require("express");
-const http          = require("http");
+const express             = require("express");
+const http                = require("http");
 const { addonBuilder, getRouter } = require("stremio-addon-sdk");
-const AbortController = global.AbortController || require("abort-controller");
-const fetch         = global.fetch || require("node-fetch");
+const AbortController     = global.AbortController || require("abort-controller");
+const fetch               = global.fetch || require("node-fetch");
 
 const PORT           = process.env.PORT || 7000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
@@ -24,11 +24,11 @@ const manifest = {
 };
 const builder = addonBuilder(manifest);
 
-// ── In‑Memory Cache ─────────────────────────────────────────────────────────
+// ── Simple In‑Memory Cache ────────────────────────────────────────────────────
 const cache = new Map();
 const TTL   = 5 * 60 * 1000;
 function put(key, val){
-  cache.set(key,val);
+  cache.set(key, val);
   setTimeout(()=>cache.delete(key), TTL);
 }
 
@@ -36,24 +36,23 @@ function put(key, val){
 builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   const uaRaw = headers?.["user-agent"] || "";
   const uaL   = uaRaw.toLowerCase();
-  const isTV  = /(exoplayer|stagefright|dalvik|android tv|shield|bravia|crkey|smarttv)/i.test(uaL) || !uaRaw;
-  console.log(`\n[${new Date().toISOString()}] Stream request: type=${type}, id=${id}, isTV=${isTV}`);
+  // Only flag as TV/Cast if UA matches a known Cast/TV pattern:
+  const isTV = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
+  console.log(`[${new Date().toISOString()}] Stream request: type=${type}, id=${id}, UA="${uaRaw}", isTV=${isTV}`);
 
   // Determine source manifest URL
   const rawSrc = query?.sourceAddonUrl || config?.sourceAddonUrl || global.lastSrc || DEFAULT_SOURCE;
   const src    = decodeURIComponent(rawSrc).replace("stremio://","https://");
   global.lastSrc = src;
-  console.log(`Using source manifest: ${src}`);
 
-  // Build the API URL
+  // Build API URL
   const base   = src.replace(/\/manifest\.json$/,"");
   const qStr   = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const apiUrl = `${base}/stream/${type}/${id}.json${qStr}`;
-  console.log(`Fetching streams from: ${apiUrl}`);
 
-  // Check cache
+  // Cache lookup
   const cacheKey = `${type}:${id}:${qStr}`;
-  if (cache.has(cacheKey)){
+  if (cache.has(cacheKey)) {
     console.log("→ Cache hit");
     return cache.get(cacheKey);
   }
@@ -75,27 +74,33 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   const json = await res.json();
   console.log(`→ Fetched ${json.streams?.length||0} streams`);
 
-  // Print out upstream container/codecs
-  (json.streams||[]).slice(0,5).forEach((s,i) => {
-    console.log(`  Stream[${i}]: container=${s.container}, videoCodec=${s.videoCodec}, audioCodec=${s.audioCodec}`);
-  });
+  // Filter to only Real‑Debrid links
+  let streams = (json.streams || [])
+    .filter(s => s.url && s.url.includes("/resolve/realdebrid/"));
 
-  // Filter for Real‑Debrid links
-  let streams = (json.streams||[]).filter(s => s.url && s.url.includes("/resolve/realdebrid/"));
-  console.log(`→ Found ${streams.length} RD links`);
+  // If TV, only keep .mp4 URLs
+  if (isTV) {
+    streams = streams.filter(s => /\.mp4($|\?)/i.test(s.url));
+    console.log(`→ ${streams.length} .mp4 links for TV`);
+  }
 
-  // Map to Stremio streams
-  const mapped = streams.map((s,i) => {
+  // Map to Stremio format
+  const mapped = streams.map((s, i) => {
+    // Derive extension from URL
+    const m = s.url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+    const ext = m ? m[1].toLowerCase() : "mp4";
+
     const label = `[RD] Stream ${i+1}`;
+
     if (isTV) {
-      // Chromecast/TV: transcode via HLS
+      // Tell Stremio to transcode to HLS for Chromecast
       return {
         name:  label,
         title: label,
-        url:   s.url.replace(/^http:/,"https:"),
+        url:   s.url.replace(/^http:/, "https:"),
         behaviorHints: {
           filename:    `${label.replace(/\s+/g,"_")}.mp4`,
-          notWebReady: true,                 // trigger FFmpeg→HLS
+          notWebReady: true,                    // trigger FFmpeg→HLS
           container:   "mp4",
           videoCodec:  "h264",
           audioCodec:  "aac",
@@ -105,27 +110,18 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
       };
     }
 
-    // Desktop: raw container/codec
-    let ext       = ".mkv";
-    let container = "mkv";
-    let vcodec    = "h265";
-    if (s.container) {
-      container = s.container;
-      ext       = `.${s.container}`;
-      vcodec    = s.videoCodec || vcodec;
-    }
-
+    // Desktop: serve raw container
     return {
       name:  label,
       title: label,
-      url:   s.url.replace(/^http:/,"https:"),
+      url:   s.url.replace(/^http:/, "https:"),
       behaviorHints: {
-        filename:    `${label.replace(/\s+/g,"_")}${ext}`,
+        filename:    `${label.replace(/\s+/g,"_")}.${ext}`,
         notWebReady: false,
-        container,
-        videoCodec: vcodec,
-        contentType:`video/${container}`,
-        bingeGroup: "renamerGroup",
+        container:   ext,
+        videoCodec:  ext === "mkv" ? "h265" : "h264",
+        contentType: `video/${ext}`,
+        bingeGroup:  "renamerGroup",
       },
     };
   });
@@ -149,25 +145,25 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
 
   const out = { streams: mapped };
   put(cacheKey, out);
-  console.log(`→ Returning ${mapped.length} streams\n`);
+  console.log(`→ Returning ${mapped.length} streams`);
   return out;
 });
 
-// ── Express Setup ─────────────────────────────────────────────────────────────
+// ── Express App ─────────────────────────────────────────────────────────────
 const app = express();
-app.use((req,res,next) => {
+app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
-  res.setHeader("Access-Control-Allow-Origin", req.headers.origin||"*");
-  res.setHeader("Access-Control-Allow-Methods","GET,OPTIONS,POST");
-  res.setHeader("Access-Control-Allow-Headers","Content-Type,Accept,Authorization");
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,POST");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Authorization");
   if (req.method === "OPTIONS") return res.sendStatus(200);
   if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
   next();
 });
-app.get("/",        (r,s) => s.redirect(302, "/configure"));
-app.get(["/configure","/configure/"], (r,s) => {
+app.get("/", (_r, s) => s.redirect(302, "/configure"));
+app.get(["/configure","/configure/"], (r, s) => {
   const base = `${r.protocol}://${r.get("host")}/manifest.json`;
-  const val  = global.lastSrc||"";
+  const val  = global.lastSrc || "";
   s.type("html").send(`
     <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${val}">
     <button onclick="copy()">Copy Manifest URL</button>
@@ -176,7 +172,7 @@ app.get(["/configure","/configure/"], (r,s) => {
       function copy(){
         const v = document.getElementById('src').value.trim();
         const url = v
-          ? '${base}?sourceAddonUrl='+encodeURIComponent(v)
+          ? '${base}?sourceAddonUrl=' + encodeURIComponent(v)
           : '${base}';
         navigator.clipboard.writeText(url);
         document.getElementById('testLink').href = url;
@@ -184,10 +180,10 @@ app.get(["/configure","/configure/"], (r,s) => {
     </script>
   `);
 });
-app.get("/manifest.json", (r,s,n) => { console.log("Serving manifest.json"); n(); });
-app.get("/health", (_r,s) => s.send("OK"));
+app.get("/manifest.json", (_r, s, n) => { console.log("Serving manifest.json"); n(); });
+app.get("/health",       (_r, s) => s.send("OK"));
 app.use("/", getRouter(builder.getInterface()));
-app.use((r,s) => { s.status(404).send("Not Found"); });
+app.use((_r, s) => s.status(404).send("Not Found"));
 
 http.createServer(app).listen(PORT, () => {
   console.log(`🚀 Add‑on listening on port ${PORT}`);

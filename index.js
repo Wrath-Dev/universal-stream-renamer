@@ -33,27 +33,35 @@ function put(key, val){
 }
 
 // ── Stream Handler ──────────────────────────────────────────────────────────
-builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
+builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) => {
   const uaRaw = headers?.["user-agent"] || "";
   const uaL   = uaRaw.toLowerCase();
-  // Only flag as TV/Cast if UA matches a known Cast/TV pattern:
-  const isTV = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
-  console.log(`[${new Date().toISOString()}] Stream request: type=${type}, id=${id}, UA="${uaRaw}", isTV=${isTV}`);
 
-  // Determine source manifest URL
+  // Detect Chromecast/Cast via extra.isCast or extra.platform
+  const isCast = extra?.isCast === true || extra?.platform === "cast";
+  // Fallback UA sniff for other TV/Android players
+  const isUAplay = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
+  const isTV   = isCast || isUAplay;
+
+  console.log(`\n[${new Date().toISOString()}] Stream request: type=${type}, id=${id}`);
+  console.log(`  UA="${uaRaw}", extra.platform="${extra?.platform}", isCast=${isCast}, isTV=${isTV}`);
+
+  // Determine which manifest.json to pull from
   const rawSrc = query?.sourceAddonUrl || config?.sourceAddonUrl || global.lastSrc || DEFAULT_SOURCE;
   const src    = decodeURIComponent(rawSrc).replace("stremio://","https://");
   global.lastSrc = src;
+  console.log(`  Source manifest: ${src}`);
 
-  // Build API URL
+  // Build the API URL
   const base   = src.replace(/\/manifest\.json$/,"");
   const qStr   = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const apiUrl = `${base}/stream/${type}/${id}.json${qStr}`;
+  console.log(`  Fetching: ${apiUrl}`);
 
   // Cache lookup
   const cacheKey = `${type}:${id}:${qStr}`;
   if (cache.has(cacheKey)) {
-    console.log("→ Cache hit");
+    console.log("  → Cache hit");
     return cache.get(cacheKey);
   }
 
@@ -66,38 +74,39 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   try {
     res = await fetch(apiUrl, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  } catch(err) {
-    console.error("Fetch error:", err.message);
+  } catch (err) {
+    console.error("  Fetch error:", err.message);
     return { streams: [] };
   }
 
   const json = await res.json();
-  console.log(`→ Fetched ${json.streams?.length||0} streams`);
+  console.log(`  → Fetched ${json.streams?.length||0} upstream streams`);
 
   // Filter to only Real‑Debrid links
   let streams = (json.streams || [])
     .filter(s => s.url && s.url.includes("/resolve/realdebrid/"));
 
-  // If TV, only keep .mp4 URLs
+  // If TV/Cast, only keep .mp4 URLs
   if (isTV) {
     streams = streams.filter(s => /\.mp4($|\?)/i.test(s.url));
-    console.log(`→ ${streams.length} .mp4 links for TV`);
+    console.log(`  → ${streams.length} .mp4 links for TV`);
   }
 
   // Map to Stremio format
   const mapped = streams.map((s, i) => {
     // Derive extension from URL
-    const m = s.url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+    const m   = s.url.match(/\.([a-z0-9]+)(?:\?|$)/i);
     const ext = m ? m[1].toLowerCase() : "mp4";
 
     const label = `[RD] Stream ${i+1}`;
+    const url   = s.url.replace(/^http:/, "https:");
 
     if (isTV) {
-      // Tell Stremio to transcode to HLS for Chromecast
+      // Chromecast/TV: transcode via HLS
       return {
         name:  label,
         title: label,
-        url:   s.url.replace(/^http:/, "https:"),
+        url,
         behaviorHints: {
           filename:    `${label.replace(/\s+/g,"_")}.mp4`,
           notWebReady: true,                    // trigger FFmpeg→HLS
@@ -114,7 +123,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
     return {
       name:  label,
       title: label,
-      url:   s.url.replace(/^http:/, "https:"),
+      url,
       behaviorHints: {
         filename:    `${label.replace(/\s+/g,"_")}.${ext}`,
         notWebReady: false,
@@ -128,7 +137,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
 
   // Fallback if none
   if (!mapped.length) {
-    console.warn("No streams → using fallback MP4");
+    console.warn("  No streams → using fallback MP4");
     mapped.push({
       name:  "Fallback MP4",
       title: "Fallback MP4",
@@ -145,7 +154,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
 
   const out = { streams: mapped };
   put(cacheKey, out);
-  console.log(`→ Returning ${mapped.length} streams`);
+  console.log(`  → Returning ${mapped.length} streams\n`);
   return out;
 });
 

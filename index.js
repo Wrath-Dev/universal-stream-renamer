@@ -11,7 +11,7 @@ const FALLBACK_MP4 = "https://commondatastorage.googleapis.com/gtv-videos-bucket
 /* ───────── Manifest ───────── */
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.3.14",
+  version: "4.3.15",
   name: "Universal Stream Renamer",
   description: "Renames Real-Debrid direct links for Stremio (Chromecast & desktop).",
   resources: ["stream"],
@@ -90,11 +90,12 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
     return {
       name: label,
       title: label,
-      url: s.url.replace(/^http:/, "https:"), // Use url for internal streaming
+      url: s.url.replace(/^http:/, "https:"), // Direct RD URL
       behaviorHints: {
         filename: `${label.replace(/\s+/g, "_")}.mp4`,
-        contentType: "video/mp4", // Explicitly indicate streamable video
-        notWebReady: false, // Ensure Stremio handles internally
+        notWebReady: false,
+        videoCodec: "h265", // Common codec for RD streams
+        container: "mkv", // Match expected file type
       },
     };
   });
@@ -107,8 +108,8 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
       url: FALLBACK_MP4,
       behaviorHints: {
         filename: "Fallback.mp4",
-        contentType: "video/mp4",
         notWebReady: false,
+        contentType: "video/mp4",
       },
     });
   }
@@ -125,20 +126,25 @@ const app = express();
 
 // Log all requests and store sourceAddonUrl
 app.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - Headers: ${JSON.stringify(req.headers)}`);
   if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
+  // Add CORS headers
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.status(200).end();
   next();
 });
 
 // Handle root path for Render
 app.get("/", (req, res) => {
   console.log(`Serving root path`);
-  res.redirect(302, "/configure"); // Redirect to configure
+  res.redirect(302, "/configure");
 });
 
 // Handle /configure
 app.get(["/configure", "/configure/"], (req, res) => {
-  const base = `${req.protocol}://${req.get("host")}/manifest.json`; // Dynamic protocol for Render
+  const base = `${req.protocol}://${req.get("host")}/manifest.json`;
   console.log(`Serving /configure, base URL: ${base}`);
   res.type("html").send(`
     <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${global.lastSrc || ""}">
@@ -171,5 +177,5 @@ app.use((req, res) => {
 // Start server
 http.createServer(app).listen(PORT, () => {
   console.log(`🚀 Add-on listening on port ${PORT}`);
-  console.log(`Try accessing: http://localhost:${PORT}/configure (local) or https://<your-render-url>.onrender.com/configure (Render)`);
+  console.log(`Try accessing: http://localhost:${PORT}/configure (local) or https://stremio-universal-stream-renamer.onrender.com/configure (Render)`);
 });

@@ -11,7 +11,7 @@ const FALLBACK_MP4 = "https://commondatastorage.googleapis.com/gtv-videos-bucket
 /* ───────── Manifest ───────── */
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.3.13",
+  version: "4.3.14",
   name: "Universal Stream Renamer",
   description: "Renames Real-Debrid direct links for Stremio (Chromecast & desktop).",
   resources: ["stream"],
@@ -90,9 +90,11 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
     return {
       name: label,
       title: label,
-      externalUrl: s.url.replace(/^http:/, "https:"), // Direct RD URL
+      url: s.url.replace(/^http:/, "https:"), // Use url for internal streaming
       behaviorHints: {
         filename: `${label.replace(/\s+/g, "_")}.mp4`,
+        contentType: "video/mp4", // Explicitly indicate streamable video
+        notWebReady: false, // Ensure Stremio handles internally
       },
     };
   });
@@ -102,8 +104,12 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
     console.log("No streams found, adding fallback MP4");
     mapped.push({
       name: "Fallback MP4",
-      externalUrl: FALLBACK_MP4,
-      behaviorHints: { filename: "Fallback.mp4" },
+      url: FALLBACK_MP4,
+      behaviorHints: {
+        filename: "Fallback.mp4",
+        contentType: "video/mp4",
+        notWebReady: false,
+      },
     });
   }
 
@@ -124,9 +130,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// Handle root path for Render
+app.get("/", (req, res) => {
+  console.log(`Serving root path`);
+  res.redirect(302, "/configure"); // Redirect to configure
+});
+
 // Handle /configure
 app.get(["/configure", "/configure/"], (req, res) => {
-  const base = `http://${req.get("host")}/manifest.json`;
+  const base = `${req.protocol}://${req.get("host")}/manifest.json`; // Dynamic protocol for Render
   console.log(`Serving /configure, base URL: ${base}`);
   res.type("html").send(`
     <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${global.lastSrc || ""}">
@@ -159,5 +171,5 @@ app.use((req, res) => {
 // Start server
 http.createServer(app).listen(PORT, () => {
   console.log(`🚀 Add-on listening on port ${PORT}`);
-  console.log(`Try accessing: http://localhost:${PORT}/configure`);
+  console.log(`Try accessing: http://localhost:${PORT}/configure (local) or https://<your-render-url>.onrender.com/configure (Render)`);
 });

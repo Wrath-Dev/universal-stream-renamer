@@ -4,14 +4,14 @@ const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const AbortController = global.AbortController || require("abort-controller");
 const fetch = global.fetch || require("node-fetch");
 
-const PORT = process.env.PORT || 7000; // Updated to 7000 with env variable fallback
+const PORT = process.env.PORT || 7000; // Rely on Render's assigned port
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4 = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
 /* ───────── Manifest ───────── */
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.3.17",
+  version: "4.3.19",
   name: "Universal Stream Renamer",
   description: "Renames Real-Debrid direct links for Stremio (Chromecast & desktop).",
   resources: ["stream"],
@@ -58,7 +58,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   }
 
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), isTV ? 5000 : 4000);
+  setTimeout(() => ctrl.abort(), isTV ? 10000 : 4000); // 10s timeout for TV devices
   let res;
   try {
     res = await fetch(api, { signal: ctrl.signal });
@@ -81,15 +81,18 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   let idx = 1;
   const mapped = streams.map((s) => {
     const label = `[RD] Stream ${idx++}`;
+    const urlParts = s.url.split("/").pop().split(".");
+    const extension = urlParts.length > 1 ? `.${urlParts.pop().toLowerCase()}` : ".mkv"; // Default to .mkv if no extension
     return {
       name: label,
       title: label,
       url: s.url.replace(/^http:/, "https:"),
       behaviorHints: {
-        filename: `${label.replace(/\s+/g, "_")}.mp4`,
+        filename: `${label.replace(/\s+/g, "_")}${extension}`,
         notWebReady: false,
         videoCodec: "h265",
-        container: "mkv",
+        container: extension.replace(".", ""),
+        bingeGroup: "renamerGroup",
       },
     };
   });
@@ -120,8 +123,8 @@ const app = express();
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - Headers: ${JSON.stringify(req.headers)}`);
   res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization");
   res.setHeader("Access-Control-Max-Age", "86400");
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
@@ -136,14 +139,17 @@ app.get("/", (req, res) => {
 app.get(["/configure", "/configure/"], (req, res) => {
   const base = `${req.protocol}://${req.get("host")}/manifest.json`;
   console.log(`Serving /configure, base URL: ${base}`);
+  const srcValue = global.lastSrc || "";
   res.type("html").send(`
-    <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${global.lastSrc || ""}">
-    <button onclick="copy()">Copy manifest URL</button>
+    <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${srcValue}">
+    <button onclick="copy()">Copy Manifest URL</button>
+    <a id="testLink" href="#" style="display:block;margin-top:1rem;">Test Manifest URL</a>
     <script>
       function copy() {
         const v = document.getElementById('src').value.trim();
         const url = v ? '${base}?sourceAddonUrl=' + encodeURIComponent(v) : '${base}';
-        navigator.clipboard.writeText(url).then(() => alert('Copied:\\n' + url));
+        document.getElementById('testLink').href = url;
+        navigator.clipboard.writeText(url).then(() => console.log('Copied:', url), (err) => console.error('Copy failed:', err));
       }
     </script>
   `);

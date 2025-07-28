@@ -9,6 +9,12 @@ const PORT           = process.env.PORT || 7000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
+// Known static error video markers from Torrentio's StaticLinks
+const ERROR_MARKERS = [
+  'failed_infringement_v2.mp4',
+  // you can add other markers like 'failed_access_v2.mp4', etc.
+];
+
 // ── Manifest & Builder ───────────────────────────────────────────────────────
 const manifest = {
   id:           "org.universal.stream.renamer",
@@ -37,22 +43,25 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) 
   const uaRaw = headers?.["user-agent"] || "";
   const uaL   = uaRaw.toLowerCase();
 
-  // Detect Chromecast/Cast via extra.isCast or extra.platform
-  const isCast = extra?.isCast === true || extra?.platform === "cast";
-  // Fallback UA sniff for other TV/Android players
-  const isUAplay = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
-  const isTV   = isCast || isUAplay;
+  // Debug extra parameters
+  console.log("extra:", JSON.stringify(extra));
 
-  console.log(`\n[${new Date().toISOString()}] Stream request: type=${type}, id=${id}`);
+  // Detect Chromecast/Cast via extra or UA sniff or blank UA
+  const isCast   = extra?.isCast === true || extra?.platform === "cast";
+  const isUAplay = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
+  const isTV     = isCast || isUAplay || !uaRaw;
+
+  console.log(`\n[${new Date().toISOString()}] Stream request:`);
+  console.log(`  type=${type}, id=${id}`);
   console.log(`  UA="${uaRaw}", extra.platform="${extra?.platform}", isCast=${isCast}, isTV=${isTV}`);
 
-  // Determine which manifest.json to pull from
+  // Determine source manifest URL
   const rawSrc = query?.sourceAddonUrl || config?.sourceAddonUrl || global.lastSrc || DEFAULT_SOURCE;
   const src    = decodeURIComponent(rawSrc).replace("stremio://","https://");
   global.lastSrc = src;
   console.log(`  Source manifest: ${src}`);
 
-  // Build the API URL
+  // Build API URL
   const base   = src.replace(/\/manifest\.json$/,"");
   const qStr   = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const apiUrl = `${base}/stream/${type}/${id}.json${qStr}`;
@@ -92,24 +101,40 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) 
     console.log(`  → ${streams.length} .mp4 links for TV`);
   }
 
-  // Map to Stremio format
+  // Map to Stremio format with error interception
   const mapped = streams.map((s, i) => {
-    // Derive extension from URL
-    const m   = s.url.match(/\.([a-z0-9]+)(?:\?|$)/i);
-    const ext = m ? m[1].toLowerCase() : "mp4";
-
-    const label = `[RD] Stream ${i+1}`;
     const url   = s.url.replace(/^http:/, "https:");
+    const m     = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+    const ext   = m ? m[1].toLowerCase() : "mp4";
+    const label = `[RD] Stream ${i+1}`;
+
+    // Check for infringement error marker
+    const isError = ERROR_MARKERS.some(marker => url.toLowerCase().endsWith(marker));
+    if (isError) {
+      console.log(`  → Stream #${i+1} is infringement error, using fallback`);
+      return {
+        name:  "Fallback Video",
+        title: "Fallback Video",
+        url:   FALLBACK_MP4,
+        behaviorHints: {
+          filename:    "Fallback.mp4",
+          notWebReady: false,
+          container:   "mp4",
+          videoCodec:  "h264",
+          contentType: "video/mp4",
+        }
+      };
+    }
 
     if (isTV) {
-      // Chromecast/TV: transcode via HLS
+      // Chromecast/TV: force HLS transcode
       return {
         name:  label,
         title: label,
         url,
         behaviorHints: {
           filename:    `${label.replace(/\s+/g,"_")}.mp4`,
-          notWebReady: true,                    // trigger FFmpeg→HLS
+          notWebReady: true,  // trigger FFmpeg→HLS
           container:   "mp4",
           videoCodec:  "h264",
           audioCodec:  "aac",
@@ -190,7 +215,7 @@ app.get(["/configure","/configure/"], (r, s) => {
   `);
 });
 app.get("/manifest.json", (_r, s, n) => { console.log("Serving manifest.json"); n(); });
-app.get("/health",       (_r, s) => s.send("OK"));
+app.get("/health", (_r, s) => s.send("OK"));
 app.use("/", getRouter(builder.getInterface()));
 app.use((_r, s) => s.status(404).send("Not Found"));
 

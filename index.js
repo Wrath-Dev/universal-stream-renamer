@@ -1,17 +1,17 @@
 const express = require("express");
 const http = require("http");
-const { addonBuilder, getRouter } = require("stremio-addon-sdk");
+const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 const AbortController = global.AbortController || require("abort-controller");
 const fetch = global.fetch || require("node-fetch");
 
-const PORT = process.env.PORT || 7000; // Rely on Render's assigned port
+const PORT = process.env.PORT; // Rely on Render's assigned port
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4 = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
 /* ───────── Manifest ───────── */
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.3.19",
+  version: "4.3.20",
   name: "Universal Stream Renamer",
   description: "Renames Real-Debrid direct links for Stremio (Chromecast & desktop).",
   resources: ["stream"],
@@ -58,7 +58,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   }
 
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), isTV ? 10000 : 4000); // 10s timeout for TV devices
+  setTimeout(() => ctrl.abort(), isTV ? 15000 : 4000); // Increased TV timeout to 15s
   let res;
   try {
     res = await fetch(api, { signal: ctrl.signal });
@@ -92,6 +92,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
         notWebReady: false,
         videoCodec: "h265",
         container: extension.replace(".", ""),
+        contentType: `video/${extension.replace(".", "")}`, // Add contentType hint
         bingeGroup: "renamerGroup",
       },
     };
@@ -108,6 +109,21 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
         contentType: "video/mp4",
       },
     });
+  } else {
+    // Add H.264 fallback for TV devices
+    if (isTV) {
+      mapped.push({
+        name: "Fallback H.264",
+        url: FALLBACK_MP4,
+        behaviorHints: {
+          filename: "Fallback_H264.mp4",
+          notWebReady: false,
+          videoCodec: "h264",
+          container: "mp4",
+          contentType: "video/mp4",
+        },
+      });
+    }
   }
 
   console.log(`Final streams: ${mapped.length}`, JSON.stringify(mapped.slice(0, 3), null, 2));
@@ -136,37 +152,12 @@ app.get("/", (req, res) => {
   res.redirect(302, "/configure");
 });
 
-app.get(["/configure", "/configure/"], (req, res) => {
-  const base = `${req.protocol}://${req.get("host")}/manifest.json`;
-  console.log(`Serving /configure, base URL: ${base}`);
-  const srcValue = global.lastSrc || "";
-  res.type("html").send(`
-    <input id="src" style="width:100%;padding:.6rem" placeholder="${DEFAULT_SOURCE}" value="${srcValue}">
-    <button onclick="copy()">Copy Manifest URL</button>
-    <a id="testLink" href="#" style="display:block;margin-top:1rem;">Test Manifest URL</a>
-    <script>
-      function copy() {
-        const v = document.getElementById('src').value.trim();
-        const url = v ? '${base}?sourceAddonUrl=' + encodeURIComponent(v) : '${base}';
-        document.getElementById('testLink').href = url;
-        navigator.clipboard.writeText(url).then(() => console.log('Copied:', url), (err) => console.error('Copy failed:', err));
-      }
-    </script>
-  `);
-});
-
-app.get("/manifest.json", (req, res, next) => {
-  console.log(`Serving /manifest.json, query: ${JSON.stringify(req.query, null, 2)}`);
-  console.log(`Manifest response: ${JSON.stringify(builder.getInterface(), null, 2)}`);
-  next();
-});
+app.use("/", serveHTTP(builder.getInterface()));
 
 app.get("/health", (req, res) => {
   console.log(`[${new Date().toISOString()}] Health check`);
   res.status(200).send("OK");
 });
-
-app.use("/", getRouter(builder.getInterface()));
 
 app.use((req, res) => {
   console.log(`404: ${req.method} ${req.originalUrl}`);

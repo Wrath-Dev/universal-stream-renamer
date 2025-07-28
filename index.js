@@ -4,14 +4,14 @@ const { addonBuilder, getRouter } = require("stremio-addon-sdk");
 const AbortController = global.AbortController || require("abort-controller");
 const fetch = global.fetch || require("node-fetch");
 
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 7000; // Updated to 7000 with env variable fallback
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4 = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
 /* ───────── Manifest ───────── */
 const manifest = {
   id: "org.universal.stream.renamer",
-  version: "4.3.15",
+  version: "4.3.17",
   name: "Universal Stream Renamer",
   description: "Renames Real-Debrid direct links for Stremio (Chromecast & desktop).",
   resources: ["stream"],
@@ -41,13 +41,11 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   console.log(`Config: ${JSON.stringify(config || {}, null, 2)}`);
   console.log(`Query: ${JSON.stringify(query || {}, null, 2)}`);
 
-  // Use query.sourceAddonUrl as primary source
   const rawSrc = query?.sourceAddonUrl || config?.sourceAddonUrl || global.lastSrc || DEFAULT_SOURCE;
   const src = decodeURIComponent(rawSrc).replace("stremio://", "https://");
   global.lastSrc = src;
   console.log(`Source URL: ${src}`);
 
-  // Build stream endpoint
   const base = src.replace(/\/manifest\.json$/, "");
   const qStr = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const api = `${base}/stream/${type}/${id}.json${qStr}`;
@@ -59,7 +57,6 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
     return cache.get(cKey);
   }
 
-  // Fetch Torrentio
   const ctrl = new AbortController();
   setTimeout(() => ctrl.abort(), isTV ? 5000 : 4000);
   let res;
@@ -74,33 +71,29 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   const json = await res.json();
   console.log(`Fetched streams: ${json.streams?.length ?? 0}`);
 
-  // Log first few streams
   (json.streams || []).slice(0, 3).forEach((s, i) => {
     console.log(`Stream #${i + 1}:`, JSON.stringify({ url: s.url, infoHash: s.infoHash }, null, 2));
   });
 
-  // Filter Real-Debrid direct links
   const streams = (json.streams || []).filter((s) => s.url && s.url.includes("/resolve/realdebrid/"));
   console.log(`Direct RD links: ${streams.length}`);
 
-  // Map and rename streams
   let idx = 1;
   const mapped = streams.map((s) => {
     const label = `[RD] Stream ${idx++}`;
     return {
       name: label,
       title: label,
-      url: s.url.replace(/^http:/, "https:"), // Direct RD URL
+      url: s.url.replace(/^http:/, "https:"),
       behaviorHints: {
         filename: `${label.replace(/\s+/g, "_")}.mp4`,
         notWebReady: false,
-        videoCodec: "h265", // Common codec for RD streams
-        container: "mkv", // Match expected file type
+        videoCodec: "h265",
+        container: "mkv",
       },
     };
   });
 
-  // Add fallback if no streams
   if (mapped.length === 0) {
     console.log("No streams found, adding fallback MP4");
     mapped.push({
@@ -124,25 +117,22 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
 /* ───────── Express Setup ───────── */
 const app = express();
 
-// Log all requests and store sourceAddonUrl
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} - Headers: ${JSON.stringify(req.headers)}`);
-  if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
-  // Add CORS headers
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept");
+  res.setHeader("Access-Control-Max-Age", "86400");
   if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.query.sourceAddonUrl) global.lastSrc = req.query.sourceAddonUrl;
   next();
 });
 
-// Handle root path for Render
 app.get("/", (req, res) => {
   console.log(`Serving root path`);
   res.redirect(302, "/configure");
 });
 
-// Handle /configure
 app.get(["/configure", "/configure/"], (req, res) => {
   const base = `${req.protocol}://${req.get("host")}/manifest.json`;
   console.log(`Serving /configure, base URL: ${base}`);
@@ -159,22 +149,24 @@ app.get(["/configure", "/configure/"], (req, res) => {
   `);
 });
 
-// Log manifest requests
 app.get("/manifest.json", (req, res, next) => {
   console.log(`Serving /manifest.json, query: ${JSON.stringify(req.query, null, 2)}`);
+  console.log(`Manifest response: ${JSON.stringify(builder.getInterface(), null, 2)}`);
   next();
 });
 
-// Mount Stremio router
+app.get("/health", (req, res) => {
+  console.log(`[${new Date().toISOString()}] Health check`);
+  res.status(200).send("OK");
+});
+
 app.use("/", getRouter(builder.getInterface()));
 
-// Fallback for debugging
 app.use((req, res) => {
   console.log(`404: ${req.method} ${req.originalUrl}`);
   res.status(404).send("Not Found");
 });
 
-// Start server
 http.createServer(app).listen(PORT, () => {
   console.log(`🚀 Add-on listening on port ${PORT}`);
   console.log(`Try accessing: http://localhost:${PORT}/configure (local) or https://stremio-universal-stream-renamer.onrender.com/configure (Render)`);

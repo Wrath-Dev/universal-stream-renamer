@@ -9,12 +9,6 @@ const PORT           = process.env.PORT || 7000;
 const DEFAULT_SOURCE = "https://torrentio.strem.fun/manifest.json";
 const FALLBACK_MP4   = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
 
-// Known static error video markers from Torrentio's StaticLinks
-const ERROR_MARKERS = [
-  'failed_infringement_v2.mp4',
-  // you can add other markers like 'failed_access_v2.mp4', etc.
-];
-
 // ── Manifest & Builder ───────────────────────────────────────────────────────
 const manifest = {
   id:           "org.universal.stream.renamer",
@@ -39,38 +33,27 @@ function put(key, val){
 }
 
 // ── Stream Handler ──────────────────────────────────────────────────────────
-builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) => {
+builder.defineStreamHandler(async ({ type, id, config, headers, query }) => {
   const uaRaw = headers?.["user-agent"] || "";
   const uaL   = uaRaw.toLowerCase();
-
-  // Debug extra parameters
-  console.log("extra:", JSON.stringify(extra));
-
-  // Detect Chromecast/Cast via extra or UA sniff or blank UA
-  const isCast   = extra?.isCast === true || extra?.platform === "cast";
-  const isUAplay = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
-  const isTV     = isCast || isUAplay || !uaRaw;
-
-  console.log(`\n[${new Date().toISOString()}] Stream request:`);
-  console.log(`  type=${type}, id=${id}`);
-  console.log(`  UA="${uaRaw}", extra.platform="${extra?.platform}", isCast=${isCast}, isTV=${isTV}`);
+  // Only flag as TV/Cast if UA matches a known Cast/TV pattern:
+  const isTV = /(exoplayer|stagefright|android\s?tv|crkey|googlecast|smarttv|appletv|roku)/i.test(uaRaw);
+  console.log(`[${new Date().toISOString()}] Stream request: type=${type}, id=${id}, UA="${uaRaw}", isTV=${isTV}`);
 
   // Determine source manifest URL
   const rawSrc = query?.sourceAddonUrl || config?.sourceAddonUrl || global.lastSrc || DEFAULT_SOURCE;
   const src    = decodeURIComponent(rawSrc).replace("stremio://","https://");
   global.lastSrc = src;
-  console.log(`  Source manifest: ${src}`);
 
   // Build API URL
   const base   = src.replace(/\/manifest\.json$/,"");
   const qStr   = src.includes("?") ? src.slice(src.indexOf("?")) : "";
   const apiUrl = `${base}/stream/${type}/${id}.json${qStr}`;
-  console.log(`  Fetching: ${apiUrl}`);
 
   // Cache lookup
   const cacheKey = `${type}:${id}:${qStr}`;
   if (cache.has(cacheKey)) {
-    console.log("  → Cache hit");
+    console.log("→ Cache hit");
     return cache.get(cacheKey);
   }
 
@@ -83,58 +66,41 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) 
   try {
     res = await fetch(apiUrl, { signal: ctrl.signal });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  } catch (err) {
-    console.error("  Fetch error:", err.message);
+  } catch(err) {
+    console.error("Fetch error:", err.message);
     return { streams: [] };
   }
 
   const json = await res.json();
-  console.log(`  → Fetched ${json.streams?.length||0} upstream streams`);
+  console.log(`→ Fetched ${json.streams?.length||0} streams`);
 
   // Filter to only Real‑Debrid links
   let streams = (json.streams || [])
     .filter(s => s.url && s.url.includes("/resolve/realdebrid/"));
 
-  // If TV/Cast, only keep .mp4 URLs
+  // If TV, only keep .mp4 URLs
   if (isTV) {
     streams = streams.filter(s => /\.mp4($|\?)/i.test(s.url));
-    console.log(`  → ${streams.length} .mp4 links for TV`);
+    console.log(`→ ${streams.length} .mp4 links for TV`);
   }
 
-  // Map to Stremio format with error interception
+  // Map to Stremio format
   const mapped = streams.map((s, i) => {
-    const url   = s.url.replace(/^http:/, "https:");
-    const m     = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
-    const ext   = m ? m[1].toLowerCase() : "mp4";
+    // Derive extension from URL
+    const m = s.url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+    const ext = m ? m[1].toLowerCase() : "mp4";
+
     const label = `[RD] Stream ${i+1}`;
 
-    // Check for infringement error marker
-    const isError = ERROR_MARKERS.some(marker => url.toLowerCase().endsWith(marker));
-    if (isError) {
-      console.log(`  → Stream #${i+1} is infringement error, using fallback`);
-      return {
-        name:  "Fallback Video",
-        title: "Fallback Video",
-        url:   FALLBACK_MP4,
-        behaviorHints: {
-          filename:    "Fallback.mp4",
-          notWebReady: false,
-          container:   "mp4",
-          videoCodec:  "h264",
-          contentType: "video/mp4",
-        }
-      };
-    }
-
     if (isTV) {
-      // Chromecast/TV: force HLS transcode
+      // Tell Stremio to transcode to HLS for Chromecast
       return {
         name:  label,
         title: label,
-        url,
+        url:   s.url.replace(/^http:/, "https:"),
         behaviorHints: {
           filename:    `${label.replace(/\s+/g,"_")}.mp4`,
-          notWebReady: true,  // trigger FFmpeg→HLS
+          notWebReady: true,                    // trigger FFmpeg→HLS
           container:   "mp4",
           videoCodec:  "h264",
           audioCodec:  "aac",
@@ -148,7 +114,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) 
     return {
       name:  label,
       title: label,
-      url,
+      url:   s.url.replace(/^http:/, "https:"),
       behaviorHints: {
         filename:    `${label.replace(/\s+/g,"_")}.${ext}`,
         notWebReady: false,
@@ -162,7 +128,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) 
 
   // Fallback if none
   if (!mapped.length) {
-    console.warn("  No streams → using fallback MP4");
+    console.warn("No streams → using fallback MP4");
     mapped.push({
       name:  "Fallback MP4",
       title: "Fallback MP4",
@@ -179,7 +145,7 @@ builder.defineStreamHandler(async ({ type, id, config, headers, query, extra }) 
 
   const out = { streams: mapped };
   put(cacheKey, out);
-  console.log(`  → Returning ${mapped.length} streams\n`);
+  console.log(`→ Returning ${mapped.length} streams`);
   return out;
 });
 
@@ -215,7 +181,7 @@ app.get(["/configure","/configure/"], (r, s) => {
   `);
 });
 app.get("/manifest.json", (_r, s, n) => { console.log("Serving manifest.json"); n(); });
-app.get("/health", (_r, s) => s.send("OK"));
+app.get("/health",       (_r, s) => s.send("OK"));
 app.use("/", getRouter(builder.getInterface()));
 app.use((_r, s) => s.status(404).send("Not Found"));
 
